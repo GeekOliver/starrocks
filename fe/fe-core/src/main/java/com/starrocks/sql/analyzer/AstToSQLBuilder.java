@@ -25,7 +25,6 @@ import com.starrocks.common.util.ParseUtil;
 import com.starrocks.sql.ast.ArrayExpr;
 import com.starrocks.sql.ast.CTERelation;
 import com.starrocks.sql.ast.FieldReference;
-import com.starrocks.sql.ast.InsertStmt;
 import com.starrocks.sql.ast.MapExpr;
 import com.starrocks.sql.ast.NormalizedTableFunctionRelation;
 import com.starrocks.sql.ast.SelectList;
@@ -35,13 +34,18 @@ import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.ast.SubqueryRelation;
 import com.starrocks.sql.ast.TableFunctionRelation;
 import com.starrocks.sql.ast.TableRelation;
+import com.starrocks.sql.ast.TableSampleClause;
 import com.starrocks.sql.ast.ViewRelation;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static java.util.stream.Collectors.toList;
@@ -53,15 +57,33 @@ import static java.util.stream.Collectors.toList;
  * Such as string serialization of views
  */
 public class AstToSQLBuilder {
+    private static final Logger LOG = LogManager.getLogger(AstToSQLBuilder.class);
 
     public static String buildSimple(StatementBase statement) {
         Map<TableName, Table> tables = AnalyzerUtils.collectAllTableAndViewWithAlias(statement);
         boolean sameCatalogDb = tables.keySet().stream().map(TableName::getCatalogAndDb).distinct().count() == 1;
-        return new AST2SQLBuilderVisitor(sameCatalogDb, false).visit(statement);
+        return new AST2SQLBuilderVisitor(sameCatalogDb, false, true).visit(statement);
     }
 
     public static String toSQL(ParseNode statement) {
-        return new AST2SQLBuilderVisitor(false, false).visit(statement);
+        return new AST2SQLBuilderVisitor(false, false, true).visit(statement);
+    }
+
+    // for executable SQL with credential, such as pipe insert sql
+    public static String toSQLWithCredential(ParseNode statement) {
+        return new AST2SQLBuilderVisitor(false, false, false).visit(statement);
+    }
+
+    // return sql from ast or default sql if builder throws exception.
+    // for example, `select from files` needs file schema to generate sql from ast.
+    // If BE is down, the schema will be null, and an exception will be thrown when writing audit log.
+    public static String toSQLOrDefault(ParseNode statement, String defaultSql) {
+        try {
+            return toSQL(statement);
+        } catch (Exception e) {
+            LOG.info("Ast to sql failed.", e);
+            return defaultSql;
+        }
     }
 
     public static class AST2SQLBuilderVisitor extends AstToStringBuilder.AST2StringBuilderVisitor {
@@ -69,7 +91,8 @@ public class AstToSQLBuilder {
         protected final boolean simple;
         protected final boolean withoutTbl;
 
-        public AST2SQLBuilderVisitor(boolean simple, boolean withoutTbl) {
+        public AST2SQLBuilderVisitor(boolean simple, boolean withoutTbl, boolean hideCredential) {
+            super(hideCredential);
             this.simple = simple;
             this.withoutTbl = withoutTbl;
         }
@@ -272,23 +295,27 @@ public class AstToSQLBuilder {
             StringBuilder sqlBuilder = new StringBuilder();
             sqlBuilder.append(node.getName().toSql());
 
+            if (node.getPartitionNames() != null) {
+                List<String> partitionNames = node.getPartitionNames().getPartitionNames();
+                if (partitionNames != null && !partitionNames.isEmpty()) {
+                    sqlBuilder.append(" PARTITION (");
+                    sqlBuilder.append(partitionNames.stream().map(c -> "`" + c + "`")
+                            .collect(Collectors.joining(", ")));
+                    sqlBuilder.append(")");
+                }
+            }
+            
             for (TableRelation.TableHint hint : CollectionUtils.emptyIfNull(node.getTableHints())) {
                 sqlBuilder.append(" [");
                 sqlBuilder.append(hint.name());
                 sqlBuilder.append("] ");
             }
 
-            if (node.getPartitionNames() != null) {
-                List<String> partitionNames = node.getPartitionNames().getPartitionNames();
-                if (partitionNames != null && !partitionNames.isEmpty()) {
-                    sqlBuilder.append(" PARTITION(");
-                }
-                for (String partitionName : partitionNames) {
-                    sqlBuilder.append("`").append(partitionName).append("`").append(",");
-                }
-                sqlBuilder.deleteCharAt(sqlBuilder.length() - 1);
-                sqlBuilder.append(")");
+            if (node.getSampleClause() != null) {
+                TableSampleClause sample = node.getSampleClause();
+                sqlBuilder.append(" ").append(sample.toSql());
             }
+
             if (node.getAlias() != null) {
                 sqlBuilder.append(" AS ");
                 sqlBuilder.append("`").append(node.getAlias().getTbl()).append("`");
@@ -303,7 +330,8 @@ public class AstToSQLBuilder {
             sqlBuilder.append(node.getFunctionName());
             sqlBuilder.append("(");
 
-            List<String> childSql = node.getChildExpressions().stream().map(this::visit).collect(toList());
+            List<String> childSql = Optional.ofNullable(node.getChildExpressions())
+                    .orElse(Collections.emptyList()).stream().map(this::visit).collect(toList());
             sqlBuilder.append(Joiner.on(",").join(childSql));
 
             sqlBuilder.append(")");
@@ -331,7 +359,9 @@ public class AstToSQLBuilder {
             sqlBuilder.append(tableFunction.getFunctionName());
             sqlBuilder.append("(");
             sqlBuilder.append(
-                    tableFunction.getChildExpressions().stream().map(this::visit).collect(Collectors.joining(",")));
+                    Optional.ofNullable(tableFunction.getChildExpressions())
+                            .orElse(Collections.emptyList()).stream().map(this::visit)
+                            .collect(Collectors.joining(",")));
             sqlBuilder.append(")");
             sqlBuilder.append(")"); // TABLE(
 
@@ -366,53 +396,6 @@ public class AstToSQLBuilder {
         }
 
         @Override
-        public String visitInsertStatement(InsertStmt insert, Void context) {
-            StringBuilder sb = new StringBuilder();
-            sb.append("INSERT ");
-
-            // add hint
-            if (insert.getHintNodes() != null) {
-                sb.append(extractHintStr(insert.getHintNodes()));
-            }
-
-
-            if (insert.isOverwrite()) {
-                sb.append("OVERWRITE ");
-            } else {
-                sb.append("INTO ");
-            }
-
-            // target
-            sb.append(insert.getTableName().toSql()).append(" ");
-
-            // target partition
-            if (insert.getTargetPartitionNames() != null &&
-                    CollectionUtils.isNotEmpty(insert.getTargetPartitionNames().getPartitionNames())) {
-                List<String> names = insert.getTargetPartitionNames().getPartitionNames();
-                sb.append("PARTITION (").append(Joiner.on(",").join(names)).append(") ");
-            }
-
-            // label
-            if (StringUtils.isNotEmpty(insert.getLabel())) {
-                sb.append("WITH LABEL `").append(insert.getLabel()).append("` ");
-            }
-
-            // target column
-            if (CollectionUtils.isNotEmpty(insert.getTargetColumnNames())) {
-                String columns = insert.getTargetColumnNames().stream()
-                        .map(x -> '`' + x + '`')
-                        .collect(Collectors.joining(","));
-                sb.append("(").append(columns).append(") ");
-            }
-
-            // source
-            if (insert.getQueryStatement() != null) {
-                sb.append(visit(insert.getQueryStatement()));
-            }
-            return sb.toString();
-        }
-
-        @Override
         public String visitArrayExpr(ArrayExpr node, Void context) {
             StringBuilder sb = new StringBuilder();
             Type type = AnalyzerUtils.replaceNullType2Boolean(node.getType());
@@ -438,5 +421,6 @@ public class AstToSQLBuilder {
             sb.append("}");
             return sb.toString();
         }
+
     }
 }

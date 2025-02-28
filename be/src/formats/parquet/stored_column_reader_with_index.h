@@ -14,8 +14,25 @@
 
 #pragma once
 
-#include "formats/parquet/page_index_reader.h"
+#include <stddef.h>
+#include <stdint.h>
+
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include "column/vectorized_fwd.h"
+#include "common/status.h"
+#include "formats/parquet/column_reader.h"
 #include "formats/parquet/stored_column_reader.h"
+#include "formats/parquet/types.h"
+#include "formats/parquet/utils.h"
+#include "storage/range.h"
+
+namespace starrocks {
+class Column;
+class NullableColumn;
+} // namespace starrocks
 
 namespace starrocks::parquet {
 
@@ -35,10 +52,6 @@ public:
         _inner_reader->set_need_parse_levels(need_parse_levels);
     }
 
-    Status read_records(size_t* num_rows, ColumnContentType content_type, Column* dst) override {
-        return _inner_reader->read_records(num_rows, content_type, dst);
-    }
-
     Status read_range(const Range<uint64_t>& range, const Filter* filter, ColumnContentType content_type,
                       Column* dst) override;
 
@@ -48,8 +61,7 @@ public:
 
     Status get_dict_values(Column* column) override { return _inner_reader->get_dict_values(column); }
 
-    Status get_dict_values(const std::vector<int32_t>& dict_codes, const NullableColumn& nulls,
-                           Column* column) override {
+    Status get_dict_values(const Buffer<int32_t>& dict_codes, const NullableColumn& nulls, Column* column) override {
         return _inner_reader->get_dict_values(dict_codes, nulls, column);
     }
 

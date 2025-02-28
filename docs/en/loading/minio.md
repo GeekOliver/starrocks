@@ -1,22 +1,22 @@
 ---
-displayed_sidebar: "English"
+displayed_sidebar: docs
 toc_max_heading_level: 4
 ---
 
 # Load data from MinIO
 
-import InsertPrivNote from '../assets/commonMarkdown/insertPrivNote.md'
+import InsertPrivNote from '../_assets/commonMarkdown/insertPrivNote.md'
 
 StarRocks provides the following options for loading data from MinIO:
 
-- Synchronous loading using [INSERT](../sql-reference/sql-statements/data-manipulation/INSERT.md)+[`FILES()`](../sql-reference/sql-functions/table-functions/files.md)
-- Asynchronous loading using [Broker Load](../sql-reference/sql-statements/data-manipulation/BROKER_LOAD.md)
+- Synchronous loading using [INSERT](../sql-reference/sql-statements/loading_unloading/INSERT.md)+[`FILES()`](../sql-reference/sql-functions/table-functions/files.md)
+- Asynchronous loading using [Broker Load](../sql-reference/sql-statements/loading_unloading/BROKER_LOAD.md)
 
 Each of these options has its own advantages, which are detailed in the following sections.
 
 In most cases, we recommend that you use the INSERT+`FILES()` method, which is much easier to use.
 
-However, the INSERT+`FILES()` method currently supports only the Parquet and ORC file formats. Therefore, if you need to load data of other file formats such as CSV, or [perform data changes such as DELETE during data loading](../loading/Load_to_Primary_Key_tables.md), you can resort to Broker Load.
+However, the INSERT+`FILES()` method currently supports only the Parquet, ORC, and CSV file formats. Therefore, if you need to load data of other file formats such as JSON, or [perform data changes such as DELETE during data loading](../loading/Load_to_Primary_Key_tables.md), you can resort to Broker Load.
 
 ## Before you begin
 
@@ -46,11 +46,11 @@ In a nutshell, to use MinIO Access Key authentication you need to gather the fol
 - The MinIO endpoint
 - The access key and secret key used as access credentials.
 
-![MinIO access key](../assets/quick-start/MinIO-create.png)
+![MinIO access key](../_assets/quick-start/MinIO-create.png)
 
 ## Use INSERT+FILES()
 
-This method is available from v3.1 onwards and currently supports only the Parquet and ORC file formats.
+This method is available from v3.1 onwards and currently supports only the Parquet, ORC, and CSV (from v3.3.0 onwards) file formats.
 
 ### Advantages of INSERT+FILES()
 
@@ -58,9 +58,9 @@ This method is available from v3.1 onwards and currently supports only the Parqu
 
 With `FILES()`, you can:
 
-- Query the data directly from MinIO using [SELECT](../sql-reference/sql-statements/data-manipulation/SELECT.md).
-- Create and load a table using [CREATE TABLE AS SELECT](../sql-reference/sql-statements/data-definition/CREATE_TABLE_AS_SELECT.md) (CTAS).
-- Load the data into an existing table using [INSERT](../sql-reference/sql-statements/data-manipulation/INSERT.md).
+- Query the data directly from MinIO using [SELECT](../sql-reference/sql-statements/table_bucket_part_index/SELECT.md).
+- Create and load a table using [CREATE TABLE AS SELECT](../sql-reference/sql-statements/table_bucket_part_index/CREATE_TABLE_AS_SELECT.md) (CTAS).
+- Load the data into an existing table using [INSERT](../sql-reference/sql-statements/loading_unloading/INSERT.md).
 
 ### Typical examples
 
@@ -142,8 +142,17 @@ CREATE DATABASE IF NOT EXISTS mydatabase;
 USE mydatabase;
 ```
 
-Use CTAS to create a table and load the data of the
-sample dataset previously added to your MinIO system.
+Use CTAS to create a table and load the data of the sample dataset previously added to your MinIO system.
+
+:::tip
+
+The highlighted section of the command includes the settings that you may need to change:
+
+- Set the `endpoint` and `path` to match your MinIO system.
+- If your MinIO system uses SSL set `enable_ssl` to `true`.
+- Substitute your MinIO access key and secret key for `AAA` and `BBB`.
+
+:::
 
 ```sql
 CREATE TABLE user_behavior_inferred AS
@@ -168,13 +177,7 @@ Query OK, 10000000 rows affected (3.17 sec)
 {'label':'insert_a5da3ff5-9ee4-11ee-90b0-02420a060004', 'status':'VISIBLE', 'txnId':'17'}
 ```
 
-:::tip
-
-Substitute your MinIO access key and secret for `AAA` and `BBB` in the above command.
-
-:::
-
-After creating the table, you can view its schema by using [DESCRIBE](../sql-reference/sql-statements/Utility/DESCRIBE.md):
+After creating the table, you can view its schema by using [DESCRIBE](../sql-reference/sql-statements/table_bucket_part_index/DESCRIBE.md):
 
 ```SQL
 DESCRIBE user_behavior_inferred;
@@ -292,6 +295,16 @@ To better control the schema of the destination table and for better query perfo
 
 After creating the table, you can load it with INSERT INTO SELECT FROM FILES():
 
+:::tip
+
+The highlighted section of the command includes the settings that you may need to change:
+
+- Set the `endpoint` and `path` to match your MinIO system.
+- If your MinIO system uses SSL set `enable_ssl` to `true`.
+- Substitute your MinIO access key and secret key for `AAA` and `BBB`.
+
+:::
+
 ```SQL
 INSERT INTO user_behavior_declared
 SELECT * FROM FILES
@@ -309,12 +322,6 @@ SELECT * FROM FILES
     "aws.s3.enable_path_style_access" = "true"
 );
 ```
-
-:::tip
-
-Substitute your MinIO access key and secret for `AAA` and `BBB` in the above command.
-
-:::
 
 After the load is complete, you can query the table to verify that the data has been loaded into it. Example:
 
@@ -336,11 +343,13 @@ The following query result is returned, indicating that the data has been succes
 
 #### Check load progress
 
-You can query the progress of INSERT jobs from the [`loads`](../reference/information_schema/loads.md) view in the StarRocks Information Schema. This feature is supported from v3.1 onwards. Example:
+You can query the progress of INSERT jobs from the [`loads`](../sql-reference/information_schema/loads.md) view in the StarRocks Information Schema. This feature is supported from v3.1 onwards. Example:
 
 ```SQL
 SELECT * FROM information_schema.loads ORDER BY JOB_ID DESC;
 ```
+
+For information about the fields provided in the `loads` view, see [`loads`](../sql-reference/information_schema/loads.md).
 
 If you have submitted multiple load jobs, you can filter on the `LABEL` associated with the job. Example:
 
@@ -372,15 +381,13 @@ SELECT * FROM information_schema.loads WHERE LABEL = 'insert_e3b882f5-7eb3-11ee-
 REJECTED_RECORD_PATH: NULL
 ```
 
-For information about the fields provided in the `loads` view, see [loads](../reference/information_schema/loads.md).
-
 :::tip
 
 INSERT is a synchronous command. If an INSERT job is still running, you need to open another session to check its execution status.
 
 :::
 
-## Compare the table sizes on disk
+### Compare the table sizes on disk
 
 This query compares the table with the inferred schema and the one where the schema
 is declared. Because the inferred schema has nullable columns and a varchar for the
@@ -428,11 +435,11 @@ This method supports the following file formats:
 
 ### Data flow
 
-![Workflow of Broker Load](../assets/broker_load_how-to-work_en.png)
+![Workflow of Broker Load](../_assets/broker_load_how-to-work_en.png)
 
 1. The user creates a load job.
-2. The frontend (FE) creates a query plan and distributes the plan to the backend nodes (BEs).
-3. The BEs pull the data from the source and load the data into StarRocks.
+2. The frontend (FE) creates a query plan and distributes the plan to the backend nodes (BEs) or compute nodes (CNs).
+3. The BEs or CNs pull the data from the source and load the data into StarRocks.
 
 ### Typical example
 
@@ -514,15 +521,17 @@ This job has four main sections:
 - `BROKER`: The connection details for the source.
 - `PROPERTIES`: The timeout value and any other properties to apply to the load job.
 
-For detailed syntax and parameter descriptions, see [BROKER LOAD](../sql-reference/sql-statements/data-manipulation/BROKER_LOAD.md).
+For detailed syntax and parameter descriptions, see [BROKER LOAD](../sql-reference/sql-statements/loading_unloading/BROKER_LOAD.md).
 
 #### Check load progress
 
-You can query the progress of Broker Load jobs from the [`loads`](../reference/information_schema/loads.md) view in the StarRocks Information Schema. This feature is supported from v3.1 onwards.
+You can query the progress of Broker Load jobs from the [`loads`](../sql-reference/information_schema/loads.md) view in the StarRocks Information Schema. This feature is supported from v3.1 onwards.
 
 ```SQL
 SELECT * FROM information_schema.loads;
 ```
+
+For information about the fields provided in the `loads` view, see [`loads`](../sql-reference/information_schema/loads.md).
 
 If you have submitted multiple load jobs, you can filter on the `LABEL` associated with the job. Example:
 
@@ -558,8 +567,6 @@ WHERE LABEL = 'UserBehavior'\G
 REJECTED_RECORD_PATH: NULL
 1 row in set (0.02 sec)
 ```
-
-For information about the fields provided in the `loads` view, see [loads](../reference/information_schema/loads.md).
 
 After you confirm that the load job has finished, you can check a subset of the destination table to see if the data has been successfully loaded. Example:
 
@@ -601,7 +608,7 @@ The load status of each data file is recorded and saved to the `information_sche
 
 ### Data flow
 
-![Pipe data flow](../assets/pipe_data_flow.png)
+![Pipe data flow](../_assets/pipe_data_flow.png)
 
 ### Differences between Pipe and INSERT+FILES()
 
@@ -619,7 +626,7 @@ Note that Pipe is typically used with:
 - datasets that are in multiple files
 - datasets that grow over time
 
-This example uses only one small file and is only intended to introduce the Pipe functionality. See the [FILES](../sql-reference/sql-functions/table-functions/files.md) and [CREATE PIPE](../sql-reference/sql-statements/data-manipulation/CREATE_PIPE.md) docs.
+This example uses only one small file and is only intended to introduce the Pipe functionality. See the [FILES](../sql-reference/sql-functions/table-functions/files.md) and [CREATE PIPE](../sql-reference/sql-statements/loading_unloading/pipe/CREATE_PIPE.md) docs.
 
 #### Create a database and a table
 
@@ -684,11 +691,11 @@ This job has four main sections:
 - `INSERT_SQL`: The INSERT INTO SELECT FROM FILES statement that is used to load data from the specified source data file to the destination table.
 - `PROPERTIES`: A set of optional parameters that specify how to execute the pipe. These include `AUTO_INGEST`, `POLL_INTERVAL`, `BATCH_SIZE`, and `BATCH_FILES`. Specify these properties in the `"key" = "value"` format.
 
-For detailed syntax and parameter descriptions, see [CREATE PIPE](../sql-reference/sql-statements/data-manipulation/CREATE_PIPE.md).
+For detailed syntax and parameter descriptions, see [CREATE PIPE](../sql-reference/sql-statements/loading_unloading/pipe/CREATE_PIPE.md).
 
 #### Check load progress
 
-- Query the progress of Pipe jobs by using [SHOW PIPES](../sql-reference/sql-statements/data-manipulation/SHOW_PIPES.md).
+- Query the progress of Pipe jobs by using [SHOW PIPES](../sql-reference/sql-statements/loading_unloading/pipe/SHOW_PIPES.md).
 
 ```sql
 SHOW PIPES\G
@@ -709,5 +716,5 @@ DATABASE_NAME: mydatabase
 
 #### Manage Pipe jobs
 
-You can alter, suspend or resume, drop, or query the pipes you have created and retry to load specific data files. For more information, see [ALTER PIPE](../sql-reference/sql-statements/data-manipulation/ALTER_PIPE.md), [SUSPEND or RESUME PIPE](../sql-reference/sql-statements/data-manipulation/SUSPEND_or_RESUME_PIPE.md), [DROP PIPE](../sql-reference/sql-statements/data-manipulation/DROP_PIPE.md), [SHOW PIPES](../sql-reference/sql-statements/data-manipulation/SHOW_PIPES.md), and [RETRY FILE](../sql-reference/sql-statements/data-manipulation/RETRY_FILE.md).
+You can alter, suspend or resume, drop, or query the pipes you have created and retry to load specific data files. For more information, see [ALTER PIPE](../sql-reference/sql-statements/loading_unloading/pipe/ALTER_PIPE.md), [SUSPEND or RESUME PIPE](../sql-reference/sql-statements/loading_unloading/pipe/SUSPEND_or_RESUME_PIPE.md), [DROP PIPE](../sql-reference/sql-statements/loading_unloading/pipe/DROP_PIPE.md), [SHOW PIPES](../sql-reference/sql-statements/loading_unloading/pipe/SHOW_PIPES.md), and [RETRY FILE](../sql-reference/sql-statements/loading_unloading/pipe/RETRY_FILE.md).
 -->

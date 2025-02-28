@@ -46,6 +46,7 @@
 #include "column/schema.h"
 #include "gutil/endian.h"
 #include "gutil/stringprintf.h"
+#include "storage/dictionary_cache_manager.h"
 #include "storage/tablet_schema.h"
 #include "types/date_value.hpp"
 
@@ -441,8 +442,8 @@ static void prepare_ops_datas(const Schema& schema, const std::vector<ColumnId>&
             };
             break;
         default:
-            CHECK(false) << "type not supported for primary key encoding "
-                         << logical_type_to_string(schema.field(j)->type()->type());
+            DCHECK(false) << "type not supported for primary key encoding "
+                          << logical_type_to_string(schema.field(j)->type()->type());
         }
     }
 }
@@ -467,7 +468,7 @@ void PrimaryKeyEncoder::encode(const Schema& schema, const Chunk& chunk, size_t 
             dest->append(*src, offset, len);
         }
     } else {
-        CHECK(dest->is_binary() || dest->is_large_binary()) << "dest column should be binary";
+        DCHECK(dest->is_binary() || dest->is_large_binary()) << "dest column should be binary";
         int ncol = schema.num_key_fields();
         std::vector<EncodeOp> ops(ncol);
         std::vector<const void*> datas(ncol);
@@ -500,9 +501,9 @@ void PrimaryKeyEncoder::encode(const Schema& schema, const Chunk& chunk, size_t 
     }
 }
 
-void PrimaryKeyEncoder::encode_sort_key(const Schema& schema, const Chunk& chunk, size_t offset, size_t len,
-                                        Column* dest) {
-    CHECK(dest->is_binary() || dest->is_large_binary()) << "dest column should be binary";
+Status PrimaryKeyEncoder::encode_sort_key(const Schema& schema, const Chunk& chunk, size_t offset, size_t len,
+                                          Column* dest) {
+    RETURN_ERROR_IF_FALSE(dest->is_binary() || dest->is_large_binary());
     int ncol = schema.sort_key_idxes().size();
     std::vector<EncodeOp> ops(ncol);
     std::vector<const void*> datas(ncol);
@@ -571,6 +572,8 @@ void PrimaryKeyEncoder::encode_sort_key(const Schema& schema, const Chunk& chunk
             }
         }
     }
+
+    return Status::OK();
 }
 
 void PrimaryKeyEncoder::encode_selective(const Schema& schema, const Chunk& chunk, const uint32_t* indexes, size_t len,
@@ -580,7 +583,7 @@ void PrimaryKeyEncoder::encode_selective(const Schema& schema, const Chunk& chun
         auto& src = chunk.get_column_by_index(0);
         dest->append_selective(*src, indexes, 0, len);
     } else {
-        CHECK(dest->is_binary() || dest->is_large_binary()) << "dest column should be binary";
+        DCHECK(dest->is_binary() || dest->is_large_binary()) << "dest column should be binary";
         int ncol = schema.num_key_fields();
         std::vector<EncodeOp> ops(ncol);
         std::vector<const void*> datas(ncol);
@@ -674,8 +677,13 @@ Status decode_internal(const Schema& schema, const T& bkeys, size_t offset, size
     const int ncol = schema.num_key_fields();
     for (int i = 0; i < len; i++) {
         Slice s = bkeys.get_slice(offset + i);
+        bool skip_decode = (value_encode_flags != nullptr && (*value_encode_flags)[i] == SKIP_DECODE_FLAG);
         for (int j = 0; j < ncol; j++) {
             auto& column = *(dest->get_column_by_index(j));
+            if (skip_decode) {
+                column.append_default();
+                continue;
+            }
             switch (schema.field(j)->type()->type()) {
             case TYPE_BOOLEAN: {
                 auto& tc = down_cast<UInt8Column&>(column);
@@ -739,7 +747,7 @@ Status decode_internal(const Schema& schema, const T& bkeys, size_t offset, size
                 tc.append(v);
             } break;
             default:
-                CHECK(false) << "type not supported for primary key encoding";
+                RETURN_ERROR_IF_FALSE(false, "type not supported for primary key encoding");
             }
         }
     }
@@ -752,7 +760,7 @@ Status PrimaryKeyEncoder::decode(const Schema& schema, const Column& keys, size_
         // simple decoding, src & dest should have same type
         dest->get_column_by_index(0)->append(keys, offset, len);
     } else {
-        CHECK(keys.is_binary() || keys.is_large_binary()) << "keys column should be binary";
+        RETURN_ERROR_IF_FALSE(keys.is_binary() || keys.is_large_binary());
         if (keys.is_binary()) {
             auto& bkeys = down_cast<const BinaryColumn&>(keys);
             return decode_internal(schema, bkeys, offset, len, dest, value_encode_flags);

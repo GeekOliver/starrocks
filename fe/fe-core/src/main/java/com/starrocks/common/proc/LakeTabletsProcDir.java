@@ -29,6 +29,7 @@ import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
 import com.starrocks.lake.LakeTablet;
 import com.starrocks.monitor.unit.ByteSizeValue;
+import com.starrocks.qe.ConnectContext;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -71,20 +72,21 @@ public class LakeTabletsProcDir implements ProcDirInterface {
         Preconditions.checkState(table.isCloudNativeTableOrMaterializedView());
 
         List<List<Comparable>> tabletInfos = Lists.newArrayList();
+
         Locker locker = new Locker();
-        locker.lockDatabase(db, LockType.READ);
+        locker.lockDatabase(db.getId(), LockType.READ);
         try {
             for (Tablet tablet : index.getTablets()) {
                 List<Comparable> tabletInfo = Lists.newArrayList();
                 LakeTablet lakeTablet = (LakeTablet) tablet;
                 tabletInfo.add(lakeTablet.getId());
-                tabletInfo.add(new Gson().toJson(lakeTablet.getBackendIds()));
+                tabletInfo.add(new Gson().toJson(lakeTablet.getBackendIds(ConnectContext.get().getCurrentWarehouseId())));
                 tabletInfo.add(new ByteSizeValue(lakeTablet.getDataSize(true)));
                 tabletInfo.add(lakeTablet.getRowCount(0L));
                 tabletInfos.add(tabletInfo);
             }
         } finally {
-            locker.unLockDatabase(db, LockType.READ);
+            locker.unLockDatabase(db.getId(), LockType.READ);
         }
         return tabletInfos;
     }
@@ -131,7 +133,7 @@ public class LakeTabletsProcDir implements ProcDirInterface {
         }
 
         Locker locker = new Locker();
-        locker.lockDatabase(db, LockType.READ);
+        locker.lockDatabase(db.getId(), LockType.READ);
         try {
             Tablet tablet = index.getTablet(tabletId);
             if (tablet == null) {
@@ -140,7 +142,7 @@ public class LakeTabletsProcDir implements ProcDirInterface {
             Preconditions.checkState(tablet instanceof LakeTablet);
             return new LakeTabletProcNode((LakeTablet) tablet);
         } finally {
-            locker.unLockDatabase(db, LockType.READ);
+            locker.unLockDatabase(db.getId(), LockType.READ);
         }
     }
 
@@ -153,16 +155,20 @@ public class LakeTabletsProcDir implements ProcDirInterface {
         }
 
         @Override
-        public ProcResult fetchResult() throws AnalysisException {
+        public ProcResult fetchResult() {
             BaseProcResult result = new BaseProcResult();
             result.setNames(TITLE_NAMES);
+
+            // get current warehouse
+            long warehouseId = ConnectContext.get().getCurrentWarehouseId();
             List<String> row = Arrays.asList(
                     String.valueOf(tablet.getId()),
-                    new Gson().toJson(tablet.getBackendIds()),
+                    new Gson().toJson(tablet.getBackendIds(warehouseId)),
                     new ByteSizeValue(tablet.getDataSize(true)).toString(),
                     String.valueOf(tablet.getRowCount(0L))
             );
             result.addRow(row);
+
             return result;
         }
     }

@@ -15,6 +15,7 @@ package com.starrocks.qe;
 
 import com.google.common.collect.Maps;
 import com.starrocks.analysis.TableName;
+import com.starrocks.authorization.IdGenerator;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.HiveTable;
 import com.starrocks.catalog.MaterializedView;
@@ -23,10 +24,10 @@ import com.starrocks.catalog.Table;
 import com.starrocks.common.DdlException;
 import com.starrocks.connector.ConnectorMgr;
 import com.starrocks.connector.ConnectorTblMetaInfoMgr;
-import com.starrocks.privilege.IdGenerator;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.LocalMetastore;
 import com.starrocks.server.MetadataMgr;
+import com.starrocks.server.TemporaryTableMgr;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -45,7 +46,7 @@ public class ShowTableMockMeta extends MetadataMgr {
     private final Map<String, Table> externalTbSet;
 
     public ShowTableMockMeta(LocalMetastore localMetastore, ConnectorMgr connectorMgr) {
-        super(localMetastore, connectorMgr, new ConnectorTblMetaInfoMgr());
+        super(localMetastore, new TemporaryTableMgr(), connectorMgr, new ConnectorTblMetaInfoMgr());
         this.localMetastore = localMetastore;
         idGenerator = new IdGenerator();
 
@@ -127,17 +128,6 @@ public class ShowTableMockMeta extends MetadataMgr {
             return externalTbSet.get(tblName);
         }
         return tableMap.get(tblName);
-    }
-
-    @Override
-    public Table getTable(Long databaseId, Long tableId) {
-        for (Table table : tableMap.values()) {
-            if (table.getId() == tableId) {
-                return table;
-            }
-        }
-
-        return null;
     }
 
     @Override

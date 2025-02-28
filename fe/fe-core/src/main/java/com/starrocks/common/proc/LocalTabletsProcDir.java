@@ -47,6 +47,7 @@ import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.FeConstants;
 import com.starrocks.common.util.ListComparator;
+import com.starrocks.common.util.NetUtils;
 import com.starrocks.common.util.TimeUtils;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
@@ -71,6 +72,7 @@ public class LocalTabletsProcDir implements ProcDirInterface {
             .add("DataSize").add("RowCount").add("State")
             .add("LstConsistencyCheckTime").add("CheckVersion").add("CheckVersionHash")
             .add("VersionCount").add("PathHash").add("MetaUrl").add("CompactionStatus")
+            .add("DiskRootPath")
             .build();
 
     private final Database db;
@@ -102,7 +104,7 @@ public class LocalTabletsProcDir implements ProcDirInterface {
 
         List<List<Comparable>> tabletInfos = new ArrayList<List<Comparable>>();
         Locker locker = new Locker();
-        locker.lockDatabase(db, LockType.READ);
+        locker.lockDatabase(db.getId(), LockType.READ);
         try {
             // get infos
             for (Tablet tablet : index.getTablets()) {
@@ -143,29 +145,29 @@ public class LocalTabletsProcDir implements ProcDirInterface {
                         Backend backend = backendMap.get(replica.getBackendId());
                         String metaUrl;
                         String compactionUrl;
+                        String diskRootPath;
                         if (backend != null) {
-                            metaUrl = String.format("http://%s:%d/api/meta/header/%d",
-                                    hideIpPort ? "*" : backend.getHost(),
-                                    hideIpPort ? 0 : backend.getHttpPort(),
-                                    tabletId);
+                            String hostPort = hideIpPort ? "*:0" :
+                                    NetUtils.getHostPortInAccessibleFormat(backend.getHost(), backend.getHttpPort());
+                            metaUrl = String.format("http://" + hostPort + "/api/meta/header/%d", tabletId);
                             compactionUrl = String.format(
-                                    "http://%s:%d/api/compaction/show?tablet_id=%d",
-                                    hideIpPort ? "*" : backend.getHost(),
-                                    hideIpPort ? 0 : backend.getHttpPort(),
-                                    tabletId);
+                                    "http://" + hostPort + "/api/compaction/show?tablet_id=%d", tabletId);
+                            diskRootPath = backend.getDiskRootPath(replica.getPathHash());
                         } else {
                             metaUrl = "N/A";
                             compactionUrl = "N/A";
+                            diskRootPath = "N/A";
                         }
                         tabletInfo.add(metaUrl);
                         tabletInfo.add(compactionUrl);
+                        tabletInfo.add(diskRootPath);
 
                         tabletInfos.add(tabletInfo);
                     }
                 }
             }
         } finally {
-            locker.unLockDatabase(db, LockType.READ);
+            locker.unLockDatabase(db.getId(), LockType.READ);
         }
         return tabletInfos;
     }

@@ -23,11 +23,15 @@
 #include "column/type_traits.h"
 #include "column/vectorized_fwd.h"
 #include "common/object_pool.h"
-#include "exprs/jit/ir_helper.h"
 #include "gutil/casts.h"
+#include "runtime/runtime_state.h"
 #include "simd/mulselector.h"
 #include "types/logical_type_infra.h"
 #include "util/percentile_value.h"
+
+#ifdef STARROCKS_JIT_ENABLE
+#include "exprs/jit/ir_helper.h"
+#endif
 
 namespace starrocks {
 
@@ -70,12 +74,51 @@ public:
         return _children.size() % 2 == 1 ? Status::OK() : Status::InvalidArgument("case when children is error!");
     }
 
-    bool is_compilable() const override {
+#ifdef STARROCKS_JIT_ENABLE
+    bool is_compilable(RuntimeState* state) const override {
         if (_has_case_expr) {
-            return IRHelper::support_jit(WhenType) && IRHelper::support_jit(ResultType);
+            return state->can_jit_expr(CompilableExprType::CASE) && IRHelper::support_jit(WhenType) &&
+                   IRHelper::support_jit(ResultType);
         } else {
-            return IRHelper::support_jit(ResultType);
+            return state->can_jit_expr(CompilableExprType::CASE) && IRHelper::support_jit(ResultType);
         }
+    }
+
+    // It considers the proportion of valuable children, rather than the total score, so it can't depend on an
+    // expensive branch. The magic values are resulted from experiments.
+    JitScore compute_jit_score(RuntimeState* state) const override {
+        JitScore jit_score = {0, 0};
+        if (!is_compilable(state)) {
+            return jit_score;
+        }
+        int when_valid = 0;
+        int then_valid = 0;
+        for (auto i = 0; i < _children.size(); i++) {
+            auto tmp = _children[i]->compute_jit_score(state);
+            double valid = tmp.score > tmp.num * 0.3;
+            if (i == 0) {
+                when_valid += valid;
+            } else if (i + 1 == _children.size() && _has_else_expr) {
+                then_valid += valid;
+            } else {
+                if ((i + _has_case_expr) % 2 == 0) {
+                    when_valid += valid;
+                } else {
+                    then_valid += valid;
+                }
+            }
+            VLOG_QUERY << i << "-th score: " << tmp.score << " / " << tmp.num << " = "
+                       << tmp.score / (tmp.num ? tmp.num : 1) << " "
+                       << " valid = " << valid << "  " << _children[i]->jit_func_name(state);
+        }
+        int expr_num = _children.size() / 2;
+        VLOG_QUERY << "JIT score case: when_score =  " << when_valid << " / " << expr_num << " = "
+                   << when_valid * 1.0 / expr_num << ", then_score = " << then_valid << " / " << expr_num << " = "
+                   << then_valid * 1.0 / expr_num;
+        if (when_valid > expr_num * IRHelper::jit_score_ratio || then_valid > expr_num * IRHelper::jit_score_ratio) {
+            return {expr_num, expr_num};
+        }
+        return {0, expr_num};
     }
 
     StatusOr<LLVMDatum> generate_ir_impl(ExprContext* context, JITContext* jit_ctx) override {
@@ -177,7 +220,7 @@ public:
         }
     }
 
-    std::string jit_func_name_impl() const override {
+    std::string jit_func_name_impl(RuntimeState* state) const override {
         std::stringstream out;
         out << "{";
         for (auto i = 0; i < _children.size(); i++) {
@@ -196,11 +239,12 @@ public:
                     out << "T";
                 }
             }
-            out << "<" << _children[i]->jit_func_name() << ">";
+            out << "<" << _children[i]->jit_func_name(state) << ">";
         }
         out << "}" << (is_constant() ? "c:" : "") << (is_nullable() ? "n:" : "") << type().debug_string();
         return out.str();
     }
+#endif
 
     std::string debug_string() const override {
         std::stringstream out;
@@ -530,9 +574,9 @@ private:
                 if (check_could_use_multi_simd_selector) {
                     int then_column_size = then_columns.size();
                     int when_column_size = when_columns.size();
-                    // TODO: avoid unpack const column
+                    std::vector<bool> then_column_is_const(then_column_size);
                     for (int i = 0; i < then_column_size; ++i) {
-                        then_columns[i] = ColumnHelper::unpack_and_duplicate_const_column(size, then_columns[i]);
+                        then_column_is_const[i] = then_columns[i]->is_constant();
                     }
                     for (int i = 0; i < when_column_size; ++i) {
                         when_columns[i] = ColumnHelper::unpack_and_duplicate_const_column(size, when_columns[i]);
@@ -565,7 +609,8 @@ private:
                     auto& container = res->get_data();
                     container.resize(size);
                     SIMD_muti_selector<ResultType>::multi_select_if(select_vec, when_column_size, container,
-                                                                    select_list, then_column_size);
+                                                                    select_list, then_column_size, then_column_is_const,
+                                                                    size);
                     return res;
                 }
             }

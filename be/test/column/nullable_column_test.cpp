@@ -303,9 +303,13 @@ PARALLEL_TEST(NullableColumnTest, test_xor_checksum) {
         c0->append_datum((int32_t)i);
     }
 
-    int64_t checksum = c0->xor_checksum(0, 1001);
+    int64_t checksum = c0->xor_checksum(0, 1002);
     int64_t expected_checksum = 1001;
 
+    ASSERT_EQ(checksum, expected_checksum);
+
+    checksum = c0->xor_checksum(0, 502);
+    expected_checksum = 501;
     ASSERT_EQ(checksum, expected_checksum);
 }
 
@@ -369,7 +373,7 @@ PARALLEL_TEST(NullableColumnTest, test_replicate) {
     offsets.push_back(2);
     offsets.push_back(4);
     offsets.push_back(7);
-    auto c2 = column->replicate(offsets);
+    auto c2 = column->replicate(offsets).value();
 
     ASSERT_EQ(1, c2->get(0).get_int32());
     ASSERT_EQ(1, c2->get(1).get_int32());

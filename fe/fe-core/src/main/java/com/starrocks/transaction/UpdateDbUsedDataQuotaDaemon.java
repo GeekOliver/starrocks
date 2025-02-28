@@ -61,7 +61,7 @@ public class UpdateDbUsedDataQuotaDaemon extends FrontendDaemon {
         List<Long> dbIdList = globalStateMgr.getLocalMetastore().getDbIds();
         GlobalTransactionMgr globalTransactionMgr = globalStateMgr.getGlobalTransactionMgr();
         for (Long dbId : dbIdList) {
-            Database db = globalStateMgr.getDb(dbId);
+            Database db = globalStateMgr.getLocalMetastore().getDb(dbId);
             if (db == null) {
                 LOG.warn("Database [" + dbId + "] doese not exist, skip to update database used data quota");
                 continue;
@@ -70,7 +70,7 @@ public class UpdateDbUsedDataQuotaDaemon extends FrontendDaemon {
                 continue;
             }
             try {
-                long usedDataQuotaBytes = db.getUsedDataQuotaWithLock();
+                long usedDataQuotaBytes = globalStateMgr.getLocalMetastore().getUsedDataQuotaWithLock(db);
                 globalTransactionMgr.updateDatabaseUsedQuotaData(dbId, usedDataQuotaBytes);
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Update database[{}] used data quota bytes : {}.", db.getOriginName(), usedDataQuotaBytes);

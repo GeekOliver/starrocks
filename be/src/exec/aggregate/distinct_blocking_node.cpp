@@ -208,7 +208,7 @@ pipeline::OpFactories DistinctBlockingNode::decompose_to_pipeline(pipeline::Pipe
         return context->maybe_interpolate_local_shuffle_exchange(runtime_state(), id(), ops, [this]() {
             std::vector<ExprContext*> group_by_expr_ctxs;
             WARN_IF_ERROR(Expr::create_expr_trees(_pool, _tnode.agg_node.grouping_exprs, &group_by_expr_ctxs,
-                                                  runtime_state()),
+                                                  runtime_state(), true),
                           "create grouping expr failed");
             return group_by_expr_ctxs;
         });
@@ -251,6 +251,7 @@ pipeline::OpFactories DistinctBlockingNode::decompose_to_pipeline(pipeline::Pipe
     if (!_tnode.conjuncts.empty() || ops_with_source.back()->has_runtime_filters()) {
         may_add_chunk_accumulate_operator(ops_with_source, context, id());
     }
+    ops_with_source = context->maybe_interpolate_debug_ops(runtime_state(), _id, ops_with_source);
 
     return ops_with_source;
 }

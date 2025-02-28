@@ -141,14 +141,27 @@ void RuntimeProfile::merge(RuntimeProfile* other) {
 
 void RuntimeProfile::update(const TRuntimeProfileTree& thrift_profile) {
     int idx = 0;
-    update(thrift_profile.nodes, &idx);
+    update(thrift_profile.nodes, &idx, false);
     DCHECK_EQ(idx, thrift_profile.nodes.size());
 }
 
-void RuntimeProfile::update(const std::vector<TRuntimeProfileNode>& nodes, int* idx) {
+void RuntimeProfile::update(const std::vector<TRuntimeProfileNode>& nodes, int* idx, bool is_parent_node_old) {
     DCHECK_LT(*idx, nodes.size());
     const TRuntimeProfileNode& node = nodes[*idx];
+    bool is_node_old;
     {
+        std::lock_guard<std::mutex> l(_version_lock);
+        if (is_parent_node_old || (node.__isset.version && node.version < _version)) {
+            is_node_old = true;
+        } else {
+            is_node_old = false;
+            if (node.__isset.version) {
+                _version = node.version;
+            }
+        }
+    }
+
+    if (!is_node_old) {
         std::lock_guard<std::mutex> l(_counter_lock);
         // update this level
         std::map<std::string, Counter*>::iterator dst_iter;
@@ -179,7 +192,7 @@ void RuntimeProfile::update(const std::vector<TRuntimeProfileNode>& nodes, int* 
         }
     }
 
-    {
+    if (!is_node_old) {
         std::lock_guard<std::mutex> l(_info_strings_lock);
         const InfoStrings& info_strings = node.info_strings;
         for (const std::string& key : node.info_strings_display_order) {
@@ -219,7 +232,7 @@ void RuntimeProfile::update(const std::vector<TRuntimeProfileNode>& nodes, int* 
                 _children.push_back(std::make_pair(child, tchild.indent));
             }
 
-            child->update(nodes, idx);
+            child->update(nodes, idx, is_node_old);
         }
     }
 }
@@ -733,15 +746,17 @@ void RuntimeProfile::to_thrift(TRuntimeProfileTree* tree) {
 }
 
 void RuntimeProfile::to_thrift(std::vector<TRuntimeProfileNode>* nodes) {
-    nodes->reserve(nodes->size() + _children.size());
-
     int index = nodes->size();
-    nodes->push_back(TRuntimeProfileNode());
+    nodes->emplace_back();
     TRuntimeProfileNode& node = (*nodes)[index];
     node.name = _name;
-    node.num_children = _children.size();
     node.metadata = _metadata;
     node.indent = true;
+
+    {
+        std::lock_guard<std::mutex> l(_version_lock);
+        node.__set_version(_version);
+    }
 
     CounterMap counter_map;
     {
@@ -750,12 +765,34 @@ void RuntimeProfile::to_thrift(std::vector<TRuntimeProfileNode>* nodes) {
         node.child_counters_map = _child_counter_map;
     }
 
+    // If the node has a MIN/MAX and they need to be displayed, the node itself also needs to be reserved,
+    // otherwise it will broke the tree structure
+    std::set<std::string> keep_counters;
+    for (auto& [name, pair] : counter_map) {
+        if (pair.first->should_display()) {
+            keep_counters.emplace(name);
+            keep_counters.emplace(pair.second);
+        }
+    }
+
     for (auto& iter : counter_map) {
+        auto& name = iter.first;
+        if (keep_counters.count(name) == 0) {
+            continue;
+        }
+
         TCounter counter;
         counter.__set_name(iter.first);
-        counter.__set_value(iter.second.first->value());
-        counter.__set_type(iter.second.first->type());
-        counter.__set_strategy(iter.second.first->strategy());
+        auto& iter_counter = iter.second.first;
+        counter.__set_value(iter_counter->value());
+        counter.__set_type(iter_counter->type());
+        counter.__set_strategy(iter_counter->strategy());
+        if (iter_counter->_min_value.has_value()) {
+            counter.__set_min_value(iter_counter->_min_value.value());
+        }
+        if (iter_counter->_max_value.has_value()) {
+            counter.__set_max_value(iter_counter->_max_value.value());
+        }
         node.counters.push_back(counter);
     }
 
@@ -770,6 +807,8 @@ void RuntimeProfile::to_thrift(std::vector<TRuntimeProfileNode>* nodes) {
         std::lock_guard<std::mutex> l(_children_lock);
         children = _children;
     }
+    node.num_children = children.size();
+    nodes->reserve(nodes->size() + children.size());
 
     for (auto& i : children) {
         int child_idx = nodes->size();
@@ -885,7 +924,7 @@ RuntimeProfile* RuntimeProfile::merge_isomorphic_profiles(ObjectPool* obj_pool, 
         std::vector<std::tuple<TUnit::type, std::string, std::string>> level_ordered_counters;
         for (const auto& level_counters : all_level_counters) {
             for (const auto& [name, pair] : level_counters) {
-                level_ordered_counters.emplace_back(std::make_tuple(pair.first, name, pair.second));
+                level_ordered_counters.emplace_back(pair.first, name, pair.second);
             }
         }
 
@@ -929,19 +968,13 @@ RuntimeProfile* RuntimeProfile::merge_isomorphic_profiles(ObjectPool* obj_pool, 
                 }
 
                 if (!counter->skip_min_max()) {
-                    auto* min_counter = profile->get_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MIN, name));
-                    if (min_counter != nullptr) {
+                    if (counter->_min_value.has_value()) {
                         already_merged = true;
-                        if (min_counter->value() < min_value) {
-                            min_value = min_counter->value();
-                        }
+                        min_value = std::min(counter->_min_value.value(), min_value);
                     }
-                    auto* max_counter = profile->get_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MAX, name));
-                    if (max_counter != nullptr) {
+                    if (counter->_max_value.has_value()) {
                         already_merged = true;
-                        if (max_counter->value() > max_value) {
-                            max_value = max_counter->value();
-                        }
+                        max_value = std::max(counter->_max_value.value(), max_value);
                     }
                 }
 
@@ -972,14 +1005,12 @@ RuntimeProfile* RuntimeProfile::merge_isomorphic_profiles(ObjectPool* obj_pool, 
                 merged_counter->set(merged_value);
 
                 if (!merged_counter->skip_min_max()) {
-                    auto* min_counter =
-                            merged_profile->add_child_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MIN, name),
-                                                              type, merged_counter->strategy(), name);
-                    auto* max_counter =
-                            merged_profile->add_child_counter(strings::Substitute("$0$1", MERGED_INFO_PREFIX_MAX, name),
-                                                              type, merged_counter->strategy(), name);
-                    min_counter->set(min_value);
-                    max_counter->set(max_value);
+                    if (min_value != std::numeric_limits<int64_t>::max()) {
+                        merged_counter->_min_value.emplace(min_value);
+                    }
+                    if (max_value != std::numeric_limits<int64_t>::min()) {
+                        merged_counter->_max_value.emplace(max_value);
+                    }
                 }
             }
         }
@@ -1061,9 +1092,7 @@ void RuntimeProfile::print_child_counters(const std::string& prefix, const std::
         for (const std::string& child_counter : child_counters) {
             auto iter = counter_map.find(child_counter);
             DCHECK(iter != counter_map.end());
-            auto value = iter->second.first->value();
-            auto display_threshold = iter->second.first->display_threshold();
-            if (display_threshold == 0 || (display_threshold > 0 && value > display_threshold)) {
+            if (iter->second.first->should_display()) {
                 stream << prefix << "   - " << iter->first << ": "
                        << PrettyPrinter::print(iter->second.first->value(), iter->second.first->type()) << std::endl;
                 RuntimeProfile::print_child_counters(prefix + "  ", child_counter, counter_map, child_counter_map, s);

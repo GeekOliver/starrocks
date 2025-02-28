@@ -46,7 +46,8 @@
 #include "runtime/current_thread.h"
 #include "runtime/exec_env.h"
 #include "storage/del_vector.h"
-#include "storage/inverted/index_descriptor.hpp"
+#include "storage/index/index_descriptor.h"
+#include "storage/index/inverted/clucene/clucene_plugin.h"
 #include "storage/rowset/rowset.h"
 #include "storage/rowset/rowset_factory.h"
 #include "storage/rowset/rowset_id_generator.h"
@@ -200,6 +201,35 @@ Status SnapshotManager::convert_rowset_ids(const string& clone_dir, int64_t tabl
     new_tablet_meta_pb.set_tablet_id(tablet_id);
     new_tablet_meta_pb.set_schema_hash(schema_hash);
     auto tablet_schema = std::make_shared<const TabletSchema>(new_tablet_meta_pb.schema());
+
+    // handle inverted index file
+    std::vector<std::string> all_files;
+    std::vector<std::string> new_inverted_index_files;
+    RETURN_IF_ERROR(FileSystem::Default()->get_children(clone_dir, &all_files));
+    for (const auto& file : all_files) {
+        if (CLucenePlugin::is_index_files(file)) {
+            auto* p1 = (char*)std::memchr(file.data(), '_', file.size());
+            auto* p2 = (char*)std::memchr(p1 + 1, '_', file.size() - (p1 - file.data() + 1));
+            auto* p3 = (char*)std::memchr(p2 + 1, '_', file.size() - (p2 - file.data() + 1));
+            if (p1 == nullptr || p2 == nullptr || p3 == nullptr) {
+                return Status::InternalError("invalid index file name: " + file);
+            }
+
+            std::string rowsetid = file.substr(0, p1 - file.data());
+            std::string segment_id = file.substr(p1 - file.data() + 1, p2 - p1 - 1);
+            std::string index_id = file.substr(p2 - file.data() + 1, p3 - p2 - 1);
+            std::string inverted_index_path = IndexDescriptor::inverted_index_file_path(
+                    clone_dir, rowsetid, std::stoi(segment_id), std::stoi(index_id));
+
+            if (!fs::path_exist(inverted_index_path)) {
+                RETURN_IF_ERROR(fs::create_directories(inverted_index_path));
+            }
+
+            std::string new_file_name = file.substr(p3 - file.data() + 1, file.data() + file.size() - p3);
+            RETURN_IF_ERROR(FileSystem::Default()->rename_file(clone_dir + "/" + file,
+                                                               inverted_index_path + "/" + new_file_name));
+        }
+    }
 
     std::unordered_map<string, string> old_to_new_rowsetid;
 
@@ -517,6 +547,33 @@ StatusOr<std::string> SnapshotManager::snapshot_full(const TabletSharedPtr& tabl
     dcg_snapshot_path << snapshot_dir << "/" << tablet->tablet_id() << ".dcgs_snapshot";
     RETURN_IF_ERROR(DeltaColumnGroupListHelper::save_snapshot(dcg_snapshot_path.str(), dcg_snapshot_pb));
 
+    // handle inverted index files
+    std::vector<std::string> all_files;
+    RETURN_IF_ERROR(FileSystem::Default()->get_children(snapshot_dir, &all_files));
+    for (const auto& file : all_files) {
+        auto is_dir = fs::is_directory(snapshot_dir + "/" + file);
+        if (is_dir.ok() && is_dir.value() && file.find("ivt", 0) != std::string::npos) {
+            std::vector<std::string> index_files;
+            RETURN_IF_ERROR(FileSystem::Default()->get_children(snapshot_dir + "/" + file, &index_files));
+            for (const auto& index_file : index_files) {
+                auto* p1 = (char*)std::memchr(file.data(), '_', file.size());
+                auto* p2 = (char*)std::memchr(p1 + 1, '_', file.size() - (p1 - file.data() + 1));
+                auto* p3 = (char*)std::memchr(p2 + 1, '.', file.size() - (p2 - file.data() + 1));
+
+                std::string rowsetid = file.substr(0, p1 - file.data());
+                std::string segment_id = file.substr(p1 - file.data() + 1, p2 - p1 - 1);
+                std::string index_id = file.substr(p2 - file.data() + 1, p3 - p2 - 1);
+
+                std::string old_name = snapshot_dir + "/" + file + "/" + index_file;
+                std::string new_name =
+                        snapshot_dir + "/" + rowsetid + "_" + segment_id + "_" + index_id + "_" + index_file;
+
+                RETURN_IF_ERROR(FileSystem::Default()->rename_file(old_name, new_name));
+            }
+            RETURN_IF_ERROR(FileSystem::Default()->delete_dir_recursive(snapshot_dir + "/" + file));
+        }
+    }
+
     snapshot_tablet_meta->revise_inc_rs_metas(vector<RowsetMetaSharedPtr>());
     snapshot_tablet_meta->revise_rs_metas(std::move(snapshot_rowset_metas));
     std::string header_path = _get_header_full_path(tablet, snapshot_dir);
@@ -732,13 +789,13 @@ Status SnapshotManager::assign_new_rowset_id(SnapshotMeta* snapshot_meta, const 
             RETURN_IF_ERROR(FileSystem::Default()->link_file(old_path, new_path));
             if (tablet_schema != nullptr && !tablet_schema->indexes()->empty()) {
                 int segment_n = seg_id;
-                for (int index_id = 0; index_id < tablet_schema->indexes()->size(); index_id++) {
-                    const auto& index = (*(tablet_schema->indexes()))[index_id];
+                const auto& indexes = *tablet_schema->indexes();
+                for (const auto& index : indexes) {
                     if (index.index_type() == GIN) {
                         std::string dst_inverted_link_path = IndexDescriptor::inverted_index_file_path(
-                                clone_dir, new_rowset_id.to_string(), segment_n, index_id);
+                                clone_dir, new_rowset_id.to_string(), segment_n, index.index_id());
                         std::string src_inverted_file_path = IndexDescriptor::inverted_index_file_path(
-                                clone_dir, old_rowset_id.to_string(), segment_n, index_id);
+                                clone_dir, old_rowset_id.to_string(), segment_n, index.index_id());
 
                         RETURN_IF_ERROR(fs::create_directories(dst_inverted_link_path));
                         std::set<std::string> files;

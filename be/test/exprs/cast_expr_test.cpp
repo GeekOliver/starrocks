@@ -1092,7 +1092,7 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapFailed1) {
     BitmapValue bitmap_value(bits);
 
     std::string buf;
-    buf.resize(bitmap_value.getSizeInBytes());
+    buf.resize(bitmap_value.get_size_in_bytes());
     bitmap_value.write((char*)buf.c_str());
     // non-exist type bitmap.
     *((uint8_t*)(buf.c_str())) = (uint8_t)14;
@@ -1125,7 +1125,7 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapSingle) {
     bitmap_value.add(1);
 
     std::string buf;
-    buf.resize(bitmap_value.getSizeInBytes());
+    buf.resize(bitmap_value.get_size_in_bytes());
     bitmap_value.write((char*)buf.c_str());
 
     expr_node.type = gen_type_desc(expr_node.child_type);
@@ -1140,11 +1140,11 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapSingle) {
         auto v = std::static_pointer_cast<BitmapColumn>(ptr);
         ASSERT_EQ(10, v->size());
 
-        std::vector<int64_t> expect_array;
+        Buffer<int64_t> expect_array;
         expect_array.push_back(1);
 
         for (int j = 0; j < v->size(); ++j) {
-            std::vector<int64_t> array;
+            Buffer<int64_t> array;
             v->get_data()[j]->to_array(&array);
             ASSERT_EQ(expect_array, array);
         }
@@ -1161,7 +1161,7 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapSingleFailed) {
     bitmap_value.add(1);
 
     std::string buf;
-    buf.resize(bitmap_value.getSizeInBytes());
+    buf.resize(bitmap_value.get_size_in_bytes());
     bitmap_value.write((char*)buf.c_str());
 
     size_t half_length = buf.size() / 2;
@@ -1198,7 +1198,7 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapSet) {
     bitmap_value.add(2);
 
     std::string buf;
-    buf.resize(bitmap_value.getSizeInBytes());
+    buf.resize(bitmap_value.get_size_in_bytes());
     bitmap_value.write((char*)buf.c_str());
 
     expr_node.type = gen_type_desc(expr_node.child_type);
@@ -1213,12 +1213,12 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapSet) {
         auto v = std::static_pointer_cast<BitmapColumn>(ptr);
         ASSERT_EQ(10, v->size());
 
-        std::vector<int64_t> expect_array;
+        Buffer<int64_t> expect_array;
         expect_array.push_back(1);
         expect_array.push_back(2);
 
         for (int j = 0; j < v->size(); ++j) {
-            std::vector<int64_t> array;
+            Buffer<int64_t> array;
             v->get_data()[j]->to_array(&array);
             ASSERT_EQ(expect_array, array);
         }
@@ -1236,7 +1236,7 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapSetFailed) {
     bitmap_value.add(2);
 
     std::string buf;
-    buf.resize(bitmap_value.getSizeInBytes());
+    buf.resize(bitmap_value.get_size_in_bytes());
     bitmap_value.write((char*)buf.c_str());
 
     size_t half_length = buf.size() / 2;
@@ -1275,7 +1275,7 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapMap) {
     BitmapValue bitmap_value(bits);
 
     std::string buf;
-    buf.resize(bitmap_value.getSizeInBytes());
+    buf.resize(bitmap_value.get_size_in_bytes());
     bitmap_value.write((char*)buf.c_str());
 
     expr_node.type = gen_type_desc(expr_node.child_type);
@@ -1290,13 +1290,13 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapMap) {
         auto v = std::static_pointer_cast<BitmapColumn>(ptr);
         ASSERT_EQ(10, v->size());
 
-        std::vector<int64_t> expect_array;
+        Buffer<int64_t> expect_array;
         expect_array.push_back(1);
         expect_array.push_back(342);
         expect_array.push_back(2222);
 
         for (int j = 0; j < v->size(); ++j) {
-            std::vector<int64_t> array;
+            Buffer<int64_t> array;
             v->get_data()[j]->to_array(&array);
             ASSERT_EQ(expect_array, array);
         }
@@ -1316,7 +1316,7 @@ TEST_F(VectorizedCastExprTest, stringCastBitmapMapFailed) {
     BitmapValue bitmap_value(bits);
 
     std::string buf;
-    buf.resize(bitmap_value.getSizeInBytes());
+    buf.resize(bitmap_value.get_size_in_bytes());
     bitmap_value.write((char*)buf.c_str());
     size_t half_length = buf.size() / 2;
 
@@ -1880,7 +1880,29 @@ TEST_F(VectorizedCastExprTest, jsonToValue) {
     EXPECT_EQ("true", evaluateCastFromJson<TYPE_VARCHAR>(cast_expr, "true")->get_data()[0]);
     EXPECT_EQ("star", evaluateCastFromJson<TYPE_VARCHAR>(cast_expr, "\"star\"")->get_data()[0]);
     EXPECT_EQ("{\"a\": 1}", evaluateCastFromJson<TYPE_VARCHAR>(cast_expr, "{\"a\": 1}")->get_data()[0]);
-    EXPECT_EQ("", evaluateCastFromJson<TYPE_VARCHAR>(cast_expr, "")->get_data()[0]);
+
+    EXPECT_EQ(true, evaluateCastFromJson<TYPE_BOOLEAN>(cast_expr, "\"1123\"")->get_data()[0]);
+    EXPECT_EQ(true, evaluateCastFromJson<TYPE_BOOLEAN>(cast_expr, "\"true\"")->get_data()[0]);
+    EXPECT_EQ(true, evaluateCastFromJson<TYPE_BOOLEAN>(cast_expr, 123)->get_data()[0]);
+    EXPECT_EQ(true, evaluateCastFromJson<TYPE_BOOLEAN>(cast_expr, 234.453)->get_data()[0]);
+
+    EXPECT_EQ(false, evaluateCastFromJson<TYPE_BOOLEAN>(cast_expr, "\"0\"")->get_data()[0]);
+    EXPECT_EQ(false, evaluateCastFromJson<TYPE_BOOLEAN>(cast_expr, "\"false\"")->get_data()[0]);
+    EXPECT_EQ(false, evaluateCastFromJson<TYPE_BOOLEAN>(cast_expr, 0)->get_data()[0]);
+    EXPECT_EQ(false, evaluateCastFromJson<TYPE_BOOLEAN>(cast_expr, 0.000)->get_data()[0]);
+
+    EXPECT_EQ(123123, evaluateCastFromJson<TYPE_INT>(cast_expr, "\"123123\"")->get_data()[0]);
+    EXPECT_EQ(123123, evaluateCastFromJson<TYPE_INT>(cast_expr, "123123")->get_data()[0]);
+    EXPECT_EQ(123, evaluateCastFromJson<TYPE_INT>(cast_expr, 123.123)->get_data()[0]);
+    EXPECT_EQ(1, evaluateCastFromJson<TYPE_INT>(cast_expr, true)->get_data()[0]);
+    EXPECT_EQ(0, evaluateCastFromJson<TYPE_INT>(cast_expr, false)->get_data()[0]);
+
+    EXPECT_EQ(123.123, evaluateCastFromJson<TYPE_DOUBLE>(cast_expr, "\"123.123\"")->get_data()[0]);
+    EXPECT_EQ(123, evaluateCastFromJson<TYPE_DOUBLE>(cast_expr, "\"123\"")->get_data()[0]);
+    EXPECT_EQ(123.123, evaluateCastFromJson<TYPE_DOUBLE>(cast_expr, "123.123")->get_data()[0]);
+    EXPECT_EQ(123, evaluateCastFromJson<TYPE_DOUBLE>(cast_expr, "123")->get_data()[0]);
+    EXPECT_EQ(1, evaluateCastFromJson<TYPE_DOUBLE>(cast_expr, true)->get_data()[0]);
+    EXPECT_EQ(0, evaluateCastFromJson<TYPE_DOUBLE>(cast_expr, false)->get_data()[0]);
 
     // implicit json type case
     EXPECT_EQ(1.0, evaluateCastFromJson<TYPE_DOUBLE>(cast_expr, 1)->get_data()[0]);
@@ -1891,12 +1913,12 @@ TEST_F(VectorizedCastExprTest, jsonToValue) {
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_INT>(cast_expr, "false")));
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_INT>(cast_expr, "null")));
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_INT>(cast_expr, "[1,2]")));
-    EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_BOOLEAN>(cast_expr, "1")));
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_BOOLEAN>(cast_expr, "\"a\"")));
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_BOOLEAN>(cast_expr, "1.0")));
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_BOOLEAN>(cast_expr, "null")));
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_BOOLEAN>(cast_expr, "[]")));
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_BOOLEAN>(cast_expr, "{}")));
+    EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_INT>(cast_expr, "\"123.123\"")));
 
     // overflow
     EXPECT_EQ(2, ColumnHelper::count_nulls(evaluateCastJsonNullable<TYPE_TINYINT>(cast_expr, 100000)));
@@ -2334,14 +2356,122 @@ TEST_F(VectorizedCastExprTest, json_to_array_with_const_input) {
 }
 
 TEST_F(VectorizedCastExprTest, unsupported_test) {
+    TExprNode cast_expr;
+    cast_expr.node_type = TExprNodeType::CAST_EXPR;
+    cast_expr.__set_opcode(TExprOpcode::CAST);
+    cast_expr.num_children = 1;
+
     // can't cast arry<array<int>> to array<bool> rather than crash
-    expr_node.child_type = to_thrift(LogicalType::TYPE_ARRAY);
-    expr_node.child_type_desc = gen_multi_array_type_desc(to_thrift(TYPE_INT), 2);
-    expr_node.type = gen_multi_array_type_desc(to_thrift(TYPE_BOOLEAN), 1);
-
-    std::unique_ptr<Expr> expr(VectorizedCastExprFactory::from_thrift(expr_node));
-
+    cast_expr.type = gen_multi_array_type_desc(to_thrift(TYPE_BOOLEAN), 1);
+    cast_expr.__isset.child_type = false;
+    cast_expr.__set_child_type_desc(gen_multi_array_type_desc(to_thrift(TYPE_INT), 2));
+    std::unique_ptr<Expr> expr(VectorizedCastExprFactory::from_thrift(cast_expr));
     ASSERT_TRUE(expr == nullptr);
+
+    // can't cast array<int> to varchar
+    cast_expr.type = gen_type_desc(to_thrift(LogicalType::TYPE_VARCHAR));
+    cast_expr.__isset.child_type = false;
+    cast_expr.__set_child_type_desc(gen_multi_array_type_desc(to_thrift(TYPE_INT), 1));
+    std::unique_ptr<Expr> expr2(VectorizedCastExprFactory::from_thrift(cast_expr));
+    ASSERT_TRUE(expr2 == nullptr);
+
+    Expr* expr3 = nullptr;
+    ObjectPool pool;
+    ASSERT_FALSE(Expr::create_vectorized_expr(&pool, cast_expr, &expr3, &runtime_state).ok());
+}
+
+TTypeDesc gen_struct_type_desc(const std::vector<TPrimitiveType::type> field_types,
+                               const std::vector<std::string> field_names) {
+    std::vector<TTypeNode> types_list;
+    TTypeDesc type_desc;
+
+    TTypeNode type_struct;
+    type_struct.type = TTypeNodeType::STRUCT;
+    std::vector<TStructField> fields;
+    for (const auto& field_name : field_names) {
+        TStructField field;
+        field.__set_name(field_name);
+        fields.push_back(field);
+    }
+    type_struct.__set_struct_fields(fields);
+    types_list.push_back(type_struct);
+
+    for (int index = 0; index < field_types.size(); index++) {
+        TTypeNode type_scalar;
+        TScalarType scalar_type;
+        scalar_type.__set_type(field_types[index]);
+        scalar_type.__set_precision(0);
+        scalar_type.__set_scale(0);
+        scalar_type.__set_len(0);
+        type_scalar.__set_scalar_type(scalar_type);
+        types_list.push_back(type_scalar);
+    }
+    type_desc.__set_types(types_list);
+    return type_desc;
+}
+
+static std::string cast_json_to_struct(TExprNode& cast_expr, std::vector<LogicalType> element_types,
+                                       std::vector<std::string> field_names, const std::string& str) {
+    cast_expr.child_type = to_thrift(TYPE_JSON);
+    std::vector<TPrimitiveType::type> field_types;
+    for (const auto& element_type : element_types) {
+        field_types.emplace_back(to_thrift(element_type));
+    }
+    cast_expr.type = gen_struct_type_desc(field_types, field_names);
+    ObjectPool pool;
+    std::unique_ptr<Expr> expr(VectorizedCastExprFactory::from_thrift(&pool, cast_expr));
+
+    auto json = JsonValue::parse(str);
+    if (!json.ok()) {
+        return "INVALID JSON";
+    }
+    cast_expr.type = gen_type_desc(cast_expr.child_type);
+    MockVectorizedExpr<TYPE_JSON> col1(cast_expr, 1, &json.value());
+    expr->_children.push_back(&col1);
+
+    ColumnPtr ptr = expr->evaluate(nullptr, nullptr);
+    if (ptr->size() != 1) {
+        return "EMPTY";
+    }
+    return ptr->debug_item(0);
+}
+
+TEST_F(VectorizedCastExprTest, json_to_struct) {
+    TExprNode cast_expr;
+    cast_expr.opcode = TExprOpcode::CAST;
+    cast_expr.node_type = TExprNodeType::CAST_EXPR;
+    cast_expr.num_children = 2;
+    cast_expr.__isset.opcode = true;
+    cast_expr.__isset.child_type = true;
+
+    EXPECT_EQ("{col1:1,col2:2,col3:3}",
+              cast_json_to_struct(cast_expr, {TYPE_INT, TYPE_INT, TYPE_INT}, {"col1", "col2", "col3"}, "[1,2,3]"));
+    EXPECT_EQ("{col1:1,col2:2,col3:3}",
+              cast_json_to_struct(cast_expr, {TYPE_INT, TYPE_INT, TYPE_INT}, {"col1", "col2", "col3"}, "[1,   2,  3]"));
+    EXPECT_EQ("{col1:NULL,col2:NULL,col3:NULL}",
+              cast_json_to_struct(cast_expr, {TYPE_INT, TYPE_INT, TYPE_INT}, {"col1", "col2", "col3"}, "[]"));
+    EXPECT_EQ("{col1:NULL}", cast_json_to_struct(cast_expr, {TYPE_INT}, {"col1"}, ""));
+    EXPECT_EQ("{col1:NULL}", cast_json_to_struct(cast_expr, {TYPE_INT}, {"col1"}, "a"));
+    EXPECT_EQ("{col1:NULL,col2:NULL}",
+              cast_json_to_struct(cast_expr, {TYPE_INT, TYPE_INT}, {"col1", "col2"}, R"(["a","b"])"));
+
+    EXPECT_EQ("{col1:1.1,col2:2.2,col3:3.3}", cast_json_to_struct(cast_expr, {TYPE_DOUBLE, TYPE_DOUBLE, TYPE_DOUBLE},
+                                                                  {"col1", "col2", "col3"}, "[1.1,2.2,3.3]"));
+
+    EXPECT_EQ("{col1:'a',col2:'b'}",
+              cast_json_to_struct(cast_expr, {TYPE_VARCHAR, TYPE_VARCHAR}, {"col1", "col2"}, R"(["a","b"])"));
+    EXPECT_EQ("{col1:'a',col2:' b'}",
+              cast_json_to_struct(cast_expr, {TYPE_VARCHAR, TYPE_VARCHAR}, {"col1", "col2"}, R"(["a", " b"])"));
+    EXPECT_EQ("{col1:'1',col2:'2'}",
+              cast_json_to_struct(cast_expr, {TYPE_VARCHAR, TYPE_VARCHAR}, {"col1", "col2"}, R"([1, 2])"));
+
+    EXPECT_EQ("{star:'rocks',number:1}", cast_json_to_struct(cast_expr, {TYPE_VARCHAR, TYPE_INT}, {"star", "number"},
+                                                             R"({"star": "rocks", "number": 1})"));
+    EXPECT_EQ("{number:1,star:'rocks'}", cast_json_to_struct(cast_expr, {TYPE_INT, TYPE_VARCHAR}, {"number", "star"},
+                                                             R"({"star": "rocks", "number": 1})"));
+    EXPECT_EQ("{number:1,not_found:NULL}",
+              cast_json_to_struct(cast_expr, {TYPE_INT, TYPE_VARCHAR}, {"number", "not_found"},
+                                  R"({"star": "rocks", "number": 1})"));
 }
 
 } // namespace starrocks

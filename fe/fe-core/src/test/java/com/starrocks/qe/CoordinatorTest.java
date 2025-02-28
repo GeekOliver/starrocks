@@ -38,6 +38,7 @@ import com.starrocks.qe.scheduler.dag.ExecutionFragment;
 import com.starrocks.qe.scheduler.dag.FragmentInstance;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.sql.plan.PlanTestBase;
+import com.starrocks.statistic.StatisticUtils;
 import com.starrocks.system.Backend;
 import com.starrocks.thrift.TBinlogOffset;
 import com.starrocks.thrift.TDescriptorTable;
@@ -137,7 +138,8 @@ public class CoordinatorTest extends PlanTestBase {
 
         OlapTable olapTable = getOlapTable("t0");
         List<Long> olapTableTabletIds =
-                olapTable.getAllPartitions().stream().flatMap(x -> x.getBaseIndex().getTabletIdsInOrder().stream())
+                olapTable.getAllPartitions().stream().flatMap(x -> x.getDefaultPhysicalPartition().getBaseIndex()
+                                .getTabletIdsInOrder().stream())
                         .collect(Collectors.toList());
         Assert.assertFalse(olapTableTabletIds.isEmpty());
         tupleDesc.setTable(olapTable);
@@ -159,7 +161,8 @@ public class CoordinatorTest extends PlanTestBase {
         binlogScan.finalizeStats(null);
 
         List<ScanNode> scanNodes = Arrays.asList(binlogScan);
-        CoordinatorPreprocessor prepare = new CoordinatorPreprocessor(Lists.newArrayList(), scanNodes);
+        CoordinatorPreprocessor prepare = new CoordinatorPreprocessor(Lists.newArrayList(), scanNodes,
+                StatisticUtils.buildConnectContext());
         prepare.computeFragmentInstances();
 
         FragmentScanRangeAssignment scanRangeMap =
@@ -217,7 +220,8 @@ public class CoordinatorTest extends PlanTestBase {
         fragments.add(fragment);
 
         // Build topology
-        CoordinatorPreprocessor prepare = new CoordinatorPreprocessor(fragments, scanNodes);
+        CoordinatorPreprocessor prepare = new CoordinatorPreprocessor(fragments, scanNodes,
+                StatisticUtils.buildConnectContext());
         prepare.computeFragmentInstances();
 
         // Assert

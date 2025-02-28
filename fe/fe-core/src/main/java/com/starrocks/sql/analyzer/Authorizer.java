@@ -18,28 +18,27 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.starrocks.analysis.Expr;
 import com.starrocks.analysis.TableName;
+import com.starrocks.authorization.AccessControlProvider;
+import com.starrocks.authorization.AccessController;
+import com.starrocks.authorization.AccessDeniedException;
+import com.starrocks.authorization.ObjectType;
+import com.starrocks.authorization.PEntryObject;
+import com.starrocks.authorization.PrivilegeType;
 import com.starrocks.catalog.BasicTable;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.Database;
 import com.starrocks.catalog.Function;
 import com.starrocks.catalog.InternalCatalog;
 import com.starrocks.catalog.Table;
-import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
-import com.starrocks.privilege.AccessControlProvider;
-import com.starrocks.privilege.AccessController;
-import com.starrocks.privilege.AccessDeniedException;
-import com.starrocks.privilege.NativeAccessController;
-import com.starrocks.privilege.ObjectType;
-import com.starrocks.privilege.PEntryObject;
-import com.starrocks.privilege.PrivilegeType;
-import com.starrocks.privilege.ranger.starrocks.RangerStarRocksAccessController;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.server.WarehouseManager;
 import com.starrocks.sql.ast.StatementBase;
 import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.sql.ast.pipe.PipeName;
+import com.starrocks.warehouse.Warehouse;
 import org.apache.commons.collections4.ListUtils;
 
 import java.util.List;
@@ -48,18 +47,14 @@ import java.util.Optional;
 import java.util.Set;
 
 public class Authorizer {
-    private static final AccessControlProvider INSTANCE;
+    private final AccessControlProvider accessControlProvider;
 
-    static {
-        if (Config.access_control.equals("ranger")) {
-            INSTANCE = new AccessControlProvider(new AuthorizerStmtVisitor(), new RangerStarRocksAccessController());
-        } else {
-            INSTANCE = new AccessControlProvider(new AuthorizerStmtVisitor(), new NativeAccessController());
-        }
+    public Authorizer(AccessControlProvider accessControlProvider) {
+        this.accessControlProvider = accessControlProvider;
     }
 
     public static AccessControlProvider getInstance() {
-        return INSTANCE;
+        return GlobalStateMgr.getCurrentState().getAuthorizer().accessControlProvider;
     }
 
     public static void check(StatementBase statement, ConnectContext context) {
@@ -144,11 +139,11 @@ public class Authorizer {
         getInstance().getAccessControlOrDefault(catalog).checkAnyActionOnTable(currentUser, roleIds, tableName);
     }
 
-    public static void checkColumnsAction(UserIdentity currentUser, Set<Long> roleIds,
-                                          TableName tableName, Set<String> columns,
-                                          PrivilegeType privilegeType) throws AccessDeniedException {
-        getInstance().getAccessControlOrDefault(tableName.getCatalog()).checkColumnsAction(currentUser, roleIds,
-                tableName, columns, privilegeType);
+    public static void checkColumnAction(UserIdentity currentUser, Set<Long> roleIds,
+                                         TableName tableName, String column,
+                                         PrivilegeType privilegeType) throws AccessDeniedException {
+        getInstance().getAccessControlOrDefault(tableName.getCatalog()).checkColumnAction(currentUser, roleIds,
+                tableName, column, privilegeType);
     }
 
     public static void checkViewAction(UserIdentity currentUser, Set<Long> roleIds, TableName tableName,
@@ -190,15 +185,21 @@ public class Authorizer {
 
     private static void doCheckTableLikeObject(UserIdentity currentUser, Set<Long> roleIds, String dbName,
                                                BasicTable tbl, PrivilegeType privilegeType) throws AccessDeniedException {
+        if (tbl == null) {
+            return;
+        }
+
         Table.TableType type = tbl.getType();
         switch (type) {
             case OLAP:
+            case OLAP_EXTERNAL:
             case CLOUD_NATIVE:
             case MYSQL:
             case ELASTICSEARCH:
             case HIVE:
             case HIVE_VIEW:
             case ICEBERG:
+            case ICEBERG_VIEW:
             case HUDI:
             case JDBC:
             case DELTALAKE:
@@ -206,6 +207,7 @@ public class Authorizer {
             case SCHEMA:
             case PAIMON:
             case ODPS:
+            case KUDU:
                 // `privilegeType == null` meaning we don't check specified action, just any action
                 if (privilegeType == null) {
                     checkAnyActionOnTable(currentUser, roleIds, new TableName(tbl.getCatalogName(), dbName, tbl.getName()));
@@ -416,6 +418,22 @@ public class Authorizer {
             } catch (AccessDeniedException e) {
                 return new Pair<>(false, true);
             }
+        }
+    }
+
+    public static void checkWarehouseAction(UserIdentity currentUser, Set<Long> roleIds, String name,
+                                            PrivilegeType privilegeType) throws AccessDeniedException {
+        getInstance().getAccessControlOrDefault(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME)
+                .checkWarehouseAction(currentUser, roleIds, name, privilegeType);
+    }
+
+    public static void checkAnyActionOnWarehouse(UserIdentity currentUser, Set<Long> roleIds, String name)
+            throws AccessDeniedException {
+        // Any user has an implicit usage permission on the default_warehouse
+        Warehouse warehouse = GlobalStateMgr.getCurrentState().getWarehouseMgr().getWarehouse(name);
+        if (warehouse.getId() != WarehouseManager.DEFAULT_WAREHOUSE_ID) {
+            getInstance().getAccessControlOrDefault(InternalCatalog.DEFAULT_INTERNAL_CATALOG_NAME)
+                    .checkAnyActionOnWarehouse(currentUser, roleIds, name);
         }
     }
 }

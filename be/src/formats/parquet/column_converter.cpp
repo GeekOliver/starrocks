@@ -14,23 +14,38 @@
 
 #include "formats/parquet/column_converter.h"
 
-#include <memory>
-#include <utility>
+#include <cctz/time_zone.h>
+#include <glog/logging.h>
 
-#include "column/array_column.h"
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <sstream>
+#include <utility>
+#include <vector>
+
 #include "column/binary_column.h"
+#include "column/column.h"
 #include "column/column_helper.h"
 #include "column/fixed_length_column.h"
+#include "column/nullable_column.h"
 #include "column/type_traits.h"
+#include "column/vectorized_fwd.h"
 #include "formats/parquet/schema.h"
-#include "formats/parquet/stored_column_reader.h"
+#include "formats/parquet/types.h"
 #include "gutil/casts.h"
+#include "gutil/integral_types.h"
 #include "gutil/strings/substitute.h"
-#include "runtime/decimalv2_value.h"
+#include "runtime/time_types.h"
+#include "runtime/types.h"
+#include "storage/olap_common.h"
+#include "types/date_value.h"
 #include "types/logical_type.h"
+#include "types/timestamp_value.h"
 #include "util/bit_util.h"
-#include "util/logging.h"
-#include "util/runtime_profile.h"
+#include "util/decimal_types.h"
+#include "util/int96.h"
 #include "util/timezone_utils.h"
 
 namespace starrocks::parquet {
@@ -78,11 +93,12 @@ private:
     // into UTC time, and when it reads data out, it should be converted to the time
     // according to session variable "time_zone".
     [[nodiscard]] Timestamp _utc_to_local(Timestamp timestamp) const {
-        return timestamp::add<TimeUnit::SECOND>(timestamp, _offset);
+        int offset = timestamp::get_offset_by_timezone(timestamp, _ctz);
+        return timestamp::add<TimeUnit::SECOND>(timestamp, offset);
     }
 
 private:
-    int _offset = 0;
+    cctz::time_zone _ctz;
 };
 
 class Int64ToDateTimeConverter final : public ColumnConverter {
@@ -613,14 +629,9 @@ Status parquet::Int32ToDateTimeConverter::convert(const ColumnPtr& src, Column* 
 }
 
 Status Int96ToDateTimeConverter::init(const std::string& timezone) {
-    cctz::time_zone ctz;
-    if (!TimezoneUtils::find_cctz_time_zone(timezone, ctz)) {
+    if (!TimezoneUtils::find_cctz_time_zone(timezone, _ctz)) {
         return Status::InternalError(strings::Substitute("can not find cctz time zone $0", timezone));
     }
-
-    const auto tp = std::chrono::system_clock::now();
-    const cctz::time_zone::absolute_lookup al = ctz.lookup(tp);
-    _offset = al.offset;
 
     return Status::OK();
 }
@@ -729,9 +740,12 @@ Status Int64ToDateTimeConverter::convert(const ColumnPtr& src, Column* dst) {
         if (!src_null_data[i]) {
             int64_t seconds = src_data[i] / _second_mask;
             int64_t nanoseconds = (src_data[i] % _second_mask) * _scale_to_nano_factor;
-            TimestampValue ep;
-            ep.from_unixtime(seconds, nanoseconds / 1000, _ctz);
-            dst_data[i].set_timestamp(ep.timestamp());
+
+            std::chrono::system_clock::time_point tp = std::chrono::system_clock::from_time_t(seconds);
+            int offset = _ctz.lookup(tp).offset;
+            seconds += offset;
+
+            dst_data[i].set_timestamp(timestamp::of_epoch_second(seconds, nanoseconds));
         }
     }
     dst_nullable_column->set_has_null(src_nullable_column->has_null());

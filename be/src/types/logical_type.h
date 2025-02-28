@@ -118,12 +118,6 @@ inline bool is_integer_type(LogicalType type) {
            type == TYPE_LARGEINT;
 }
 
-inline LogicalType promote_integer_types(LogicalType type1, LogicalType type2) {
-    DCHECK(is_integer_type(type1) && is_integer_type(type2));
-    if (type1 > type2) return type1;
-    return type2;
-}
-
 inline bool is_float_type(LogicalType type) {
     return type == TYPE_FLOAT || type == TYPE_DOUBLE;
 }
@@ -165,6 +159,18 @@ inline bool is_scalar_field_type(LogicalType type) {
         return false;
     default:
         return true;
+    }
+}
+
+inline bool is_semi_type(LogicalType type) {
+    switch (type) {
+    case TYPE_STRUCT:
+    case TYPE_ARRAY:
+    case TYPE_MAP:
+    case TYPE_JSON:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -264,8 +270,6 @@ constexpr bool support_column_expr_predicate(LogicalType ltype) {
     case TYPE_DECIMAL32:  /* 24 */
     case TYPE_DECIMAL64:  /* 25 */
     case TYPE_DECIMAL128: /* 26 */
-    case TYPE_JSON:
-    case TYPE_MAP:
     case TYPE_STRUCT:
         return true;
     default:

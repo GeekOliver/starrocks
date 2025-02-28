@@ -17,18 +17,18 @@ package com.starrocks.load.pipe.filelist;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.starrocks.common.Pair;
+import com.starrocks.common.StarRocksException;
 import com.starrocks.common.Status;
-import com.starrocks.common.UserException;
 import com.starrocks.common.util.DateUtils;
 import com.starrocks.load.pipe.PipeFileRecord;
 import com.starrocks.load.pipe.PipeId;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.StmtExecutor;
-import com.starrocks.sql.analyzer.SemanticException;
 import com.starrocks.sql.ast.DmlStmt;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.system.SystemInfoService;
 import com.starrocks.thrift.TResultBatch;
+import com.starrocks.utframe.UtFrameUtils;
 import mockit.Expectations;
 import mockit.Mock;
 import mockit.MockUp;
@@ -36,6 +36,7 @@ import mockit.Mocked;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 
@@ -45,8 +46,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class FileListRepoTest {
+
+    @Before
+    public void setUp() {
+        UtFrameUtils.mockInitWarehouseEnv();
+    }
 
     @Test
     public void testTestFileRecord() {
@@ -198,7 +205,7 @@ public class FileListRepoTest {
     }
 
     @Test
-    public void testCreator() throws RuntimeException, UserException {
+    public void testCreator() throws RuntimeException, StarRocksException {
         mockExecutor();
         new MockUp<RepoCreator>() {
             @Mock
@@ -219,28 +226,29 @@ public class FileListRepoTest {
         creator.run();
         Assert.assertTrue(creator.isDatabaseExists());
         Assert.assertFalse(creator.isTableExists());
-        Assert.assertFalse(creator.isTableCorrected());
 
         // create with 1 replica
         new MockUp<SystemInfoService>() {
             @Mock
-            public int getTotalBackendNumber() {
+            public int getSystemTableExpectedReplicationNum() {
                 return 1;
             }
         };
+        AtomicInteger changed = new AtomicInteger(0);
         new MockUp<RepoExecutor>() {
             @Mock
             public void executeDDL(String sql) {
+                changed.addAndGet(1);
             }
         };
         creator.run();
         Assert.assertTrue(creator.isTableExists());
-        Assert.assertFalse(creator.isTableCorrected());
+        Assert.assertEquals(1, changed.get());
 
         // be corrected to 3 replicas
         new MockUp<SystemInfoService>() {
             @Mock
-            public int getTotalBackendNumber() {
+            public int getSystemTableExpectedReplicationNum() {
                 return 3;
             }
         };
@@ -248,7 +256,7 @@ public class FileListRepoTest {
         creator.run();
         Assert.assertTrue(creator.isDatabaseExists());
         Assert.assertTrue(creator.isTableExists());
-        Assert.assertTrue(creator.isTableCorrected());
+        Assert.assertEquals(2, changed.get());
     }
 
     @Test
@@ -343,6 +351,52 @@ public class FileListRepoTest {
     }
 
     @Test
+    public void testStageFileBatch() {
+        FileListTableRepo repo = new FileListTableRepo();
+        repo.setPipeId(new PipeId(1, 1));
+
+        int batchSize = FileListTableRepo.SELECT_BATCH_SIZE;
+        int recordSize = batchSize + 1;
+        List<PipeFileRecord> records = Lists.newArrayList();
+        for (int i = 1; i <= recordSize; ++i) {
+            PipeFileRecord record = new PipeFileRecord();
+            record.pipeId = 1;
+            record.fileName = String.format("%d.parquet", i);
+            record.fileVersion = String.valueOf(i);
+            record.fileSize = i;
+            record.loadState = FileListRepo.PipeFileState.UNLOADED;
+            records.add(record);
+        }
+
+        RepoAccessor accessor = RepoAccessor.getInstance();
+        new Expectations(accessor) {
+            {
+                accessor.selectStagedFiles(records.subList(0, batchSize));
+                times = 1;
+                result = records.subList(0, batchSize);
+
+                accessor.selectStagedFiles(records.subList(batchSize, recordSize));
+                times = 1;
+                result = Lists.newArrayList();
+            }
+        };
+
+        RepoExecutor executor = RepoExecutor.getInstance();
+        new Expectations(executor) {
+            {
+                executor.executeDML(
+                        String.format("INSERT INTO _statistics_.pipe_file_list(`pipe_id`, `file_name`, `file_version`, " +
+                                "`file_size`, `state`, `last_modified`, `staged_time`, `start_load`, `finish_load`, " +
+                                "`error_info`, `insert_label`) VALUES (1, '%d.parquet', '%d', %d, 'UNLOADED', NULL, NULL, " +
+                                "NULL, NULL, '{\"errorMessage\":null}', '')", recordSize, recordSize, recordSize));
+                times = 1;
+                result = null;
+            }
+        };
+        repo.stageFiles(records);
+    }
+
+    @Test
     public void testExecutor(@Mocked StmtExecutor stmtExecutor) throws IOException {
         new MockUp<StmtExecutor>() {
             @Mock
@@ -358,8 +412,6 @@ public class FileListRepoTest {
         RepoExecutor executor = RepoExecutor.getInstance();
 
         Assert.assertTrue(executor.executeDQL("select now()").isEmpty());
-
-        Assert.assertThrows(SemanticException.class, () -> executor.executeDML("insert into a.b values (1) "));
 
         Assert.assertThrows(RuntimeException.class, () -> executor.executeDDL("create table a (id int) "));
     }

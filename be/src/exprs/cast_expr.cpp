@@ -14,10 +14,13 @@
 
 #include "exprs/cast_expr.h"
 
+#ifdef STARROCKS_JIT_ENABLE
 #include <llvm/ADT/APInt.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Value.h>
+#endif
+
 #include <ryu/ryu.h>
 
 #include <limits>
@@ -38,19 +41,24 @@
 #include "exprs/binary_function.h"
 #include "exprs/column_ref.h"
 #include "exprs/decimal_cast_expr.h"
-#include "exprs/jit/ir_helper.h"
 #include "exprs/unary_function.h"
 #include "gutil/casts.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/datetime_value.h"
-#include "runtime/large_int_value.h"
 #include "runtime/runtime_state.h"
 #include "runtime/types.h"
 #include "types/hll.h"
+#include "types/large_int_value.h"
 #include "types/logical_type.h"
 #include "util/date_func.h"
 #include "util/json.h"
+#include "util/json_converter.h"
 #include "util/mysql_global.h"
+#include "util/numeric_types.h"
+
+#ifdef STARROCKS_JIT_ENABLE
+#include "exprs/jit/ir_helper.h"
+#endif
 
 namespace starrocks {
 
@@ -70,6 +78,7 @@ struct CastFn {
     static ColumnPtr cast_fn(ColumnPtr& column);
 };
 
+// clang-format off
 // All cast implements
 #define SELF_CAST(FROM_TYPE)                                                    \
     template <bool AllowThrowException>                                         \
@@ -120,6 +129,7 @@ struct CastFn {
             return CUSTOMIZE_IMPL<FROM_TYPE, TO_TYPE, AllowThrowException>(column); \
         }                                                                           \
     };
+// clang-format on
 
 DEFINE_UNARY_FN_WITH_IMPL(TimeCheck, value) {
     return ((uint64_t)value % 100 > 59 || (uint64_t)value % 10000 > 5959);
@@ -200,7 +210,6 @@ static ColumnPtr cast_to_json_fn(ColumnPtr& column) {
         }
     }
     return builder.build(column->is_constant());
-    return {};
 }
 
 template <LogicalType FromType, LogicalType ToType, bool AllowThrowException>
@@ -215,67 +224,11 @@ static ColumnPtr cast_from_json_fn(ColumnPtr& column) {
         }
 
         JsonValue* json = viewer.value(row);
-        if constexpr (lt_is_arithmetic<ToType>) {
-            [[maybe_unused]] constexpr auto min = RunTimeTypeLimits<ToType>::min_value();
-            [[maybe_unused]] constexpr auto max = RunTimeTypeLimits<ToType>::max_value();
-            RunTimeCppType<ToType> cpp_value{};
-            bool ok = true;
-            if constexpr (lt_is_integer<ToType>) {
-                auto res = json->get_int();
-                ok = res.ok() && min <= res.value() && res.value() <= max;
-                cpp_value = ok ? res.value() : cpp_value;
-            } else if constexpr (lt_is_float<ToType>) {
-                auto res = json->get_double();
-                ok = res.ok() && min <= res.value() && res.value() <= max;
-                cpp_value = ok ? res.value() : cpp_value;
-            } else if constexpr (lt_is_boolean<ToType>) {
-                auto res = json->get_bool();
-                ok = res.ok();
-                cpp_value = ok ? res.value() : cpp_value;
-            } else {
-                if constexpr (AllowThrowException) {
-                    THROW_RUNTIME_ERROR_WITH_TYPE(ToType);
-                }
-                DCHECK(false) << "unreachable type " << ToType;
-                __builtin_unreachable();
-            }
-            if (ok) {
-                builder.append(cpp_value);
-            } else {
-                if constexpr (AllowThrowException) {
-                    THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(FromType, ToType, json->to_string().value_or(""));
-                }
-                builder.append_null();
-            }
-        } else if constexpr (lt_is_string<ToType>) {
-            // if the json already a string value, get the string directly
-            // else cast it to string representation
-            if (json->get_type() == JsonType::JSON_STRING) {
-                auto res = json->get_string();
-                if (res.ok()) {
-                    builder.append(res.value());
-                } else {
-                    if constexpr (AllowThrowException) {
-                        THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(FromType, ToType, json->to_string().value_or(""));
-                    }
-                    builder.append_null();
-                }
-            } else {
-                auto res = json->to_string();
-                if (res.ok()) {
-                    builder.append(res.value());
-                } else {
-                    if constexpr (AllowThrowException) {
-                        THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(FromType, ToType, json->to_string().value_or(""));
-                    }
-                    builder.append_null();
-                }
-            }
-        } else {
+        auto st = cast_vpjson_to<ToType, AllowThrowException>(json->to_vslice(), builder);
+        if (!st.ok()) {
             if constexpr (AllowThrowException) {
-                THROW_RUNTIME_ERROR_WITH_TYPE(ToType);
+                THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(FromType, ToType, json->to_string().value_or(""));
             }
-            DCHECK(false) << "not supported type " << ToType;
             builder.append_null();
         }
     }
@@ -409,12 +362,7 @@ DEFINE_UNARY_FN_WITH_IMPL(ImplicitToNumber, value) {
 }
 
 DEFINE_UNARY_FN_WITH_IMPL(NumberCheck, value) {
-    // std::numeric_limits<T>::lowest() is a finite value x such that there is no other
-    // finite value y where y < x.
-    // This is different from std::numeric_limits<T>::min() for floating-point types.
-    // So we use lowest instead of min for lower bound of all types.
-    return (value < (Type)std::numeric_limits<ResultType>::lowest()) |
-           (value > (Type)std::numeric_limits<ResultType>::max());
+    return check_signed_number_overflow<Type, ResultType>(value);
 }
 
 DEFINE_UNARY_FN_WITH_IMPL(NumberCheckWithThrowException, value) {
@@ -422,8 +370,7 @@ DEFINE_UNARY_FN_WITH_IMPL(NumberCheckWithThrowException, value) {
     // finite value y where y < x.
     // This is different from std::numeric_limits<T>::min() for floating-point types.
     // So we use lowest instead of min for lower bound of all types.
-    auto result = (value < (Type)std::numeric_limits<ResultType>::lowest()) |
-                  (value > (Type)std::numeric_limits<ResultType>::max());
+    const auto result = NumberCheck::apply<Type, ResultType>(value);
     if (result) {
         std::stringstream ss;
         if constexpr (std::is_same_v<Type, __int128_t>) {
@@ -871,8 +818,13 @@ ColumnPtr cast_to_timestamp_fn(ColumnPtr& column) {
 
         auto value = viewer.value(row);
         TimestampValue tv;
-
-        bool ret = tv.from_timestamp_literal_with_check((int64_t)value);
+        bool ret;
+        if constexpr (lt_is_decimalv2<FromType>) {
+            ret = value.value() > 0;
+        } else {
+            ret = value > 0;
+        }
+        ret = ret && tv.from_timestamp_literal_with_check(value);
         if constexpr (AllowThrowException) {
             if (!ret) {
                 THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(FromType, ToType, (int64_t)value);
@@ -904,43 +856,76 @@ UNARY_FN_CAST(TYPE_DATE, TYPE_DATETIME, DateToTimestmap);
 
 template <LogicalType FromType, LogicalType ToType, bool AllowThrowException>
 static ColumnPtr cast_from_string_to_datetime_fn(ColumnPtr& column) {
-    ColumnViewer<TYPE_VARCHAR> viewer(column);
-    ColumnBuilder<TYPE_DATETIME> builder(viewer.size());
+    const int num_rows = column->size();
 
-    if (!column->has_null()) {
-        for (int row = 0; row < viewer.size(); ++row) {
-            auto value = viewer.value(row);
-            TimestampValue v;
-
-            bool right = v.from_string(value.data, value.size);
-            if constexpr (AllowThrowException) {
-                if (!right) {
-                    THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(TYPE_VARCHAR, TYPE_DATETIME, value.to_string());
-                }
-            }
-            builder.append(v, !right);
-        }
-    } else {
-        for (int row = 0; row < viewer.size(); ++row) {
-            if (viewer.is_null(row)) {
-                builder.append_null();
-                continue;
-            }
-
-            auto value = viewer.value(row);
-            TimestampValue v;
-
-            bool right = v.from_string(value.data, value.size);
-            if constexpr (AllowThrowException) {
-                if (!right) {
-                    THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(TYPE_VARCHAR, TYPE_DATETIME, value.to_string());
-                }
-            }
-            builder.append(v, !right);
-        }
+    if (column->only_null()) {
+        return ColumnHelper::create_const_null_column(num_rows);
     }
 
-    return builder.build(column->is_constant());
+    if (column->is_constant()) {
+        const auto* input_column = ColumnHelper::get_binary_column(column.get());
+        const auto slice_value = input_column->get_slice(0);
+
+        TimestampValue datetime_value;
+        const bool success = datetime_value.from_string(slice_value.data, slice_value.size);
+
+        if (!success) {
+            if constexpr (AllowThrowException) {
+                THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(FromType, ToType, slice_value.to_string());
+            }
+            return ColumnHelper::create_const_null_column(num_rows);
+        }
+        return ColumnHelper::create_const_column<ToType>(datetime_value, num_rows);
+    }
+
+    auto res_data_column = RunTimeColumnType<ToType>::create();
+    res_data_column->resize(num_rows);
+    auto& res_data = res_data_column->get_data();
+
+    if (column->is_nullable()) {
+        const auto* input_column = down_cast<NullableColumn*>(column.get());
+        const auto* data_column = down_cast<BinaryColumn*>(input_column->data_column().get());
+
+        NullColumnPtr null_column = ColumnHelper::as_column<NullColumn>(input_column->null_column()->clone());
+        auto& null_data = down_cast<NullColumn*>(null_column.get())->get_data();
+
+        for (int i = 0; i < num_rows; ++i) {
+            if (!null_data[i]) {
+                auto slice_value = data_column->get_slice(i);
+                const bool success = res_data[i].from_string(slice_value.data, slice_value.size);
+
+                if constexpr (AllowThrowException) {
+                    if (!success) {
+                        THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(FromType, ToType, slice_value.to_string());
+                    }
+                }
+                null_data[i] = !success;
+            }
+        }
+        return NullableColumn::create(std::move(res_data_column), std::move(null_column));
+    } else {
+        auto* data_column = down_cast<BinaryColumn*>(column.get());
+        NullColumnPtr null_column = NullColumn::create(num_rows);
+        auto& null_data = null_column->get_data();
+
+        bool has_null = false;
+        for (int i = 0; i < num_rows; ++i) {
+            auto slice_value = data_column->get_slice(i);
+            const bool success = res_data[i].from_string(slice_value.data, slice_value.size);
+
+            if constexpr (AllowThrowException) {
+                if (!success) {
+                    THROW_RUNTIME_ERROR_WITH_TYPES_AND_VALUE(FromType, ToType, slice_value.to_string());
+                }
+            }
+            null_data[i] = !success;
+            has_null |= !success;
+        }
+        if (!has_null) {
+            return res_data_column;
+        }
+        return NullableColumn::create(std::move(res_data_column), std::move(null_column));
+    }
 }
 CUSTOMIZE_FN_CAST(TYPE_VARCHAR, TYPE_DATETIME, cast_from_string_to_datetime_fn);
 
@@ -1067,10 +1052,12 @@ static ColumnPtr cast_from_string_to_time_fn(ColumnPtr& column) {
 }
 CUSTOMIZE_FN_CAST(TYPE_VARCHAR, TYPE_TIME, cast_from_string_to_time_fn);
 
+// clang-format off
 #define DEFINE_CAST_CONSTRUCT(CLASS)             \
     CLASS(const TExprNode& node) : Expr(node) {} \
     virtual ~CLASS(){};                          \
     virtual Expr* clone(ObjectPool* pool) const override { return pool->add(new CLASS(*this)); }
+// clang-format on
 
 template <LogicalType FromType, LogicalType ToType, bool AllowThrowException>
 class VectorizedCastExpr final : public Expr {
@@ -1137,14 +1124,15 @@ public:
         }
         return result_column;
     };
+#ifdef STARROCKS_JIT_ENABLE
 
-    bool is_compilable() const override {
-        return !AllowThrowException && FromType != TYPE_LARGEINT && ToType != TYPE_LARGEINT &&
-               IRHelper::support_jit(FromType) && IRHelper::support_jit(ToType);
+    bool is_compilable(RuntimeState* state) const override {
+        return state->can_jit_expr(CompilableExprType::CAST) && !AllowThrowException && FromType != TYPE_LARGEINT &&
+               ToType != TYPE_LARGEINT && IRHelper::support_jit(FromType) && IRHelper::support_jit(ToType);
     }
 
-    std::string jit_func_name_impl() const override {
-        return "{cast(" + _children[0]->jit_func_name() + ")}" + (is_constant() ? "c:" : "") +
+    std::string jit_func_name_impl(RuntimeState* state) const override {
+        return "{cast(" + _children[0]->jit_func_name(state) + ")}" + (is_constant() ? "c:" : "") +
                (is_nullable() ? "n:" : "") + type().debug_string();
     }
 
@@ -1203,6 +1191,7 @@ public:
             return datum;
         }
     }
+#endif
 
     std::string debug_string() const override {
         std::stringstream out;
@@ -1607,6 +1596,25 @@ Expr* VectorizedCastExprFactory::create_primitive_cast(ObjectPool* pool, const T
         }
     }
 
+    if (from_type == TYPE_JSON && to_type == TYPE_STRUCT) {
+        TypeDescriptor cast_to = TypeDescriptor::from_thrift(node.type);
+
+        std::vector<std::unique_ptr<Expr>> field_casts(cast_to.children.size());
+        for (int i = 0; i < cast_to.children.size(); ++i) {
+            TypeDescriptor json_type = TypeDescriptor::create_json_type();
+            auto ret = create_cast_expr(pool, json_type, cast_to.children[i], allow_throw_exception);
+            if (!ret.ok()) {
+                LOG(WARNING) << "Not support cast from type: " << json_type << ", to type: " << cast_to.children[i];
+                return nullptr;
+            }
+            field_casts[i] = std::move(ret.value());
+            auto cast_input = create_slot_ref(json_type);
+            field_casts[i]->add_child(cast_input.get());
+            pool->add(cast_input.release());
+        }
+        return new CastJsonToStruct(node, std::move(field_casts));
+    }
+
     if (from_type == TYPE_VARCHAR && to_type == TYPE_OBJECT) {
         return dispatch_throw_exception<CastVarcharToBitmap>(allow_throw_exception, node);
     }
@@ -1632,8 +1640,7 @@ Expr* VectorizedCastExprFactory::create_primitive_cast(ObjectPool* pool, const T
             CASE_TO_STRING_FROM(TYPE_JSON, allow_throw_exception);
             CASE_TO_STRING_FROM(TYPE_VARBINARY, allow_throw_exception);
         default:
-            LOG(WARNING) << "Not support cast from type: " << type_to_string(from_type)
-                         << ", to type: " << type_to_string(to_type);
+            LOG(WARNING) << "Not support cast " << type_to_string(from_type) << " to " << type_to_string(to_type);
             return nullptr;
         }
     } else if (from_type == TYPE_JSON || to_type == TYPE_JSON) {
@@ -1650,8 +1657,7 @@ Expr* VectorizedCastExprFactory::create_primitive_cast(ObjectPool* pool, const T
                 CASE_FROM_JSON_TO(TYPE_DOUBLE, allow_throw_exception);
                 CASE_FROM_JSON_TO(TYPE_JSON, allow_throw_exception);
             default:
-                LOG(WARNING) << "Not support cast from type: " << type_to_string(from_type)
-                             << ", to type: " << type_to_string(to_type);
+                LOG(WARNING) << "Not support cast " << type_to_string(from_type) << " to " << type_to_string(to_type);
                 return nullptr;
             }
         } else {
@@ -1674,8 +1680,7 @@ Expr* VectorizedCastExprFactory::create_primitive_cast(ObjectPool* pool, const T
                 CASE_TO_JSON(TYPE_TIME, allow_throw_exception);
                 CASE_TO_JSON(TYPE_DATETIME, allow_throw_exception);
             default:
-                LOG(WARNING) << "Not support cast from type: " << type_to_string(from_type)
-                             << ", to type: " << type_to_string(to_type);
+                LOG(WARNING) << "Not support cast " << type_to_string(from_type) << " to " << type_to_string(to_type);
                 return nullptr;
             }
         }
@@ -1687,8 +1692,7 @@ Expr* VectorizedCastExprFactory::create_primitive_cast(ObjectPool* pool, const T
                 return new VectorizedCastExpr<TYPE_VARCHAR, TYPE_VARBINARY, false>(node);
             }
         } else {
-            LOG(WARNING) << "Not support cast from type: " << type_to_string(from_type)
-                         << ", to type: " << type_to_string(to_type);
+            LOG(WARNING) << "Not support cast " << type_to_string(from_type) << " to " << type_to_string(to_type);
             return nullptr;
         }
     } else {
@@ -1709,8 +1713,7 @@ Expr* VectorizedCastExprFactory::create_primitive_cast(ObjectPool* pool, const T
             CASE_TO_TYPE(TYPE_DECIMAL64, allow_throw_exception);
             CASE_TO_TYPE(TYPE_DECIMAL128, allow_throw_exception);
         default:
-            LOG(WARNING) << "Not support cast from type: " << type_to_string(from_type)
-                         << ", to type: " << type_to_string(to_type);
+            LOG(WARNING) << "Not support cast " << type_to_string(from_type) << " to " << type_to_string(to_type);
             return nullptr;
         }
     }
@@ -1783,7 +1786,7 @@ Expr* VectorizedCastExprFactory::from_thrift(ObjectPool* pool, const TExprNode& 
     }
     auto ret = create_cast_expr(pool, node, from_type, to_type, allow_throw_exception);
     if (!ret.ok()) {
-        LOG(WARNING) << "Don't support to cast type: " << from_type << " to type: " << to_type;
+        LOG(WARNING) << "Not support cast " << from_type << " to " << to_type;
         return nullptr;
     }
     return std::move(ret).value().release();
@@ -1805,7 +1808,7 @@ Expr* VectorizedCastExprFactory::from_type(const TypeDescriptor& from, const Typ
                                            ObjectPool* pool, bool allow_throw_exception) {
     auto ret = create_cast_expr(pool, from, to, allow_throw_exception);
     if (!ret.ok()) {
-        LOG(WARNING) << "Don't support to cast type: " << from << " to type: " << to;
+        LOG(WARNING) << "Not support cast " << from << " to " << to;
         return nullptr;
     }
     auto cast_expr = std::move(ret).value().release();

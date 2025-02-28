@@ -98,12 +98,13 @@ Status JitObjectCache::register_func(JITScalarFunction func) {
     // put into LRU cache
     auto* cache = new JitCacheEntry(_obj_code, _func);
     GlobalEnv::GetInstance()->jit_cache_mem_tracker()->consume(cache_func_size);
-    auto* handle = _lru_cache->insert(_cache_key, (void*)cache, cache_func_size, [](const CacheKey& key, void* value) {
-        auto* entry = ((JitCacheEntry*)value);
-        // maybe release earlier as the std::shared_ptr<llvm::MemoryBuffer> is hold by caller
-        GlobalEnv::GetInstance()->jit_cache_mem_tracker()->release(entry->obj_buff->getBufferSize());
-        delete entry;
-    });
+    auto* handle = _lru_cache->insert(
+            _cache_key, (void*)cache, cache_func_size, cache_func_size, [](const CacheKey& key, void* value) {
+                auto* entry = ((JitCacheEntry*)value);
+                // maybe release earlier as the std::shared_ptr<llvm::MemoryBuffer> is hold by caller
+                GlobalEnv::GetInstance()->jit_cache_mem_tracker()->release(entry->obj_buff->getBufferSize());
+                delete entry;
+            });
     if (handle == nullptr) {
         delete cache;
         LOG(WARNING) << "JIT register func failed, func = " << _cache_key << ", ir size = " << cache_func_size;
@@ -141,7 +142,8 @@ Status JITEngine::init() {
         if (mem_limit < JIT_CACHE_LOWEST_LIMIT) {
             _initialized = true;
             _support_jit = false;
-            LOG(WARNING) << "System or Process memory limit is less than 16GB, disable JIT";
+            LOG(WARNING) << "System or Process memory limit is less than 16GB, disable JIT. You can set "
+                            "jit_lru_cache_size a properly positive value in BE's config to force enabling JIT";
             return Status::OK();
         } else {
             jit_lru_cache_size = std::min<int64_t>((1UL << 30), (int64_t)(mem_limit * 0.01));
@@ -354,12 +356,12 @@ StatusOr<std::unique_ptr<llvm::orc::LLJIT>> build_JIT(llvm::orc::JITTargetMachin
 }
 
 JITEngine::Engine::Engine(std::unique_ptr<llvm::orc::LLJIT> lljit, std::unique_ptr<llvm::TargetMachine> target_machine)
-        : context_(std::make_unique<llvm::LLVMContext>()),
-          lljit_(std::move(lljit)),
-          ir_builder_(std::make_unique<llvm::IRBuilder<>>(*context_)),
-          target_machine_(std::move(target_machine)) {
+        : _context(std::make_unique<llvm::LLVMContext>()),
+          _lljit(std::move(lljit)),
+          _ir_builder(std::make_unique<llvm::IRBuilder<>>(*_context)),
+          _target_machine(std::move(target_machine)) {
     auto module_id = "sr_module_" + std::to_string(reinterpret_cast<uintptr_t>(this));
-    module_ = std::make_unique<llvm::Module>(module_id, *context_);
+    _module = std::make_unique<llvm::Module>(module_id, *_context);
 }
 
 // factory method to construct the engine.
@@ -374,8 +376,8 @@ StatusOr<std::unique_ptr<JITEngine::Engine>> JITEngine::Engine::create(
 }
 
 llvm::Module* JITEngine::Engine::module() const {
-    DCHECK(!module_finalized_) << "module cannot be accessed after finalized";
-    return module_.get();
+    DCHECK(!_module_finalized) << "module cannot be accessed after finalized";
+    return _module.get();
 }
 
 static void optimize_module(llvm::Module& module, llvm::TargetIRAnalysis target_analysis) {
@@ -419,30 +421,32 @@ static void optimize_module(llvm::Module& module, llvm::TargetIRAnalysis target_
 Status JITEngine::Engine::optimize_and_finalize_module() {
     std::string error;
     llvm::raw_string_ostream errs(error);
-    if (llvm::verifyModule(*module_, &errs)) {
+    if (llvm::verifyModule(*_module, &errs)) {
         return Status::JitCompileError(fmt::format("Failed to generate scalar function IR, errors: {}", errs.str()));
     }
+    auto target_analysis = _target_machine->getTargetIRAnalysis();
+    optimize_module(*_module, std::move(target_analysis));
 
-    auto target_analysis = target_machine_->getTargetIRAnalysis();
-    optimize_module(*module_, std::move(target_analysis));
-
-    if (llvm::verifyModule(*module_, &errs)) {
+    if (llvm::verifyModule(*_module, &errs)) {
         return Status::JitCompileError(fmt::format("Failed to optimize scalar function IR, errors: {}", errs.str()));
     }
+    // LOG(INFO) <<"opt module = " << dump_module_ir(*_module);
 
-    llvm::orc::ThreadSafeModule tsm(std::move(module_), std::move(context_));
-    auto err = lljit_->addIRModule(std::move(tsm));
+    llvm::orc::ThreadSafeModule tsm(std::move(_module), std::move(_context));
+    auto err = _lljit->addIRModule(std::move(tsm));
     if (err) {
         return Status::JitCompileError("Failed to add IR module to LLJIT: " + llvm::toString(std::move(err)));
     }
 
-    module_finalized_ = true;
+    _module_finalized = true;
     return Status::OK();
 }
 
 StatusOr<JITScalarFunction> JITEngine::Engine::get_compiled_func(const std::string& function) {
-    DCHECK(module_finalized_) << "module must be finalized before getting compiled function";
-    auto sym = lljit_->lookup(function);
+    if (!_module_finalized) {
+        return Status::JitCompileError("module must be finalized before getting compiled function");
+    }
+    auto sym = _lljit->lookup(function);
     if (!sym) {
         return Status::JitCompileError("Failed to look up function: " + function +
                                        " error: " + llvm::toString(sym.takeError()));

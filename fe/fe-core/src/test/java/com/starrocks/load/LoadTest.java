@@ -35,7 +35,9 @@ import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.RandomDistributionInfo;
 import com.starrocks.catalog.SinglePartitionInfo;
 import com.starrocks.catalog.Type;
-import com.starrocks.common.UserException;
+import com.starrocks.common.AnalysisException;
+import com.starrocks.common.ExceptionChecker;
+import com.starrocks.common.StarRocksException;
 import com.starrocks.sql.ast.ImportColumnDesc;
 import com.starrocks.thrift.TBrokerScanRangeParams;
 import com.starrocks.thrift.TFileFormatType;
@@ -92,7 +94,7 @@ public class LoadTest {
     }
 
     @Test
-    public void testInitColumnsPathColumns() throws UserException {
+    public void testInitColumnsPathColumns() throws StarRocksException {
         // columns
         String c0Name = "c0";
         columns.add(new Column(c0Name, Type.INT, true, null, true, null, ""));
@@ -137,7 +139,7 @@ public class LoadTest {
     }
 
     @Test
-    public void testInitColumnsColumnInSchemaAndExprArgs() throws UserException {
+    public void testInitColumnsColumnInSchemaAndExprArgs() throws StarRocksException {
         table = new OlapTable(1, "test", columns, KeysType.AGG_KEYS,
                 new SinglePartitionInfo(), new RandomDistributionInfo(3));
 
@@ -214,7 +216,7 @@ public class LoadTest {
      * set (C1 = year(c1))
      */
     @Test
-    public void testSourceColumnCaseSensitive() throws UserException {
+    public void testSourceColumnCaseSensitive() throws StarRocksException {
         // columns
         String c0Name = "c0";
         columns.add(new Column(c0Name, Type.INT, true, null, true, null, ""));
@@ -252,6 +254,42 @@ public class LoadTest {
         Assert.assertEquals(2, slotDescByName.size());
         Assert.assertFalse(slotDescByName.containsKey(c1Name));
         Assert.assertTrue(slotDescByName.containsKey(c1NameInSource));
+    }
+
+    /**
+     * set (c1 = year())
+     */
+    @Test
+    public void testMappingExprInvalid() {
+        // columns
+        String c0Name = "c0";
+        columns.add(new Column(c0Name, Type.INT, true, null, true, null, ""));
+        columnExprs.add(new ImportColumnDesc(c0Name, null));
+
+        String c1Name = "c1";
+        columns.add(new Column(c1Name, Type.INT, true, null, true, null, ""));
+
+        // column mappings
+        // c1 = year()
+        List<Expr> params1 = Lists.newArrayList();
+        Expr mapping1 = new FunctionCallExpr(FunctionSet.YEAR, params1);
+        columnExprs.add(new ImportColumnDesc(c1Name, mapping1));
+
+        new Expectations() {
+            {
+                table.getBaseSchema();
+                result = columns;
+                table.getColumn(c0Name);
+                result = columns.get(0);
+                table.getColumn(c1Name);
+                result = columns.get(1);
+            }
+        };
+
+        ExceptionChecker.expectThrowsWithMsg(AnalysisException.class,
+                "Expr 'year()' analyze error: No matching function with signature: year(), derived column is 'c1'",
+                () -> Load.initColumns(table, columnExprs, null, exprsByName, analyzer, srcTupleDesc,
+                        slotDescByName, params, true, true, columnsFromPath));
     }
 
     @Test

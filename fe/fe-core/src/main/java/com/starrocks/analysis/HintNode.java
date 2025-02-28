@@ -14,7 +14,6 @@
 
 package com.starrocks.analysis;
 
-import com.starrocks.common.UserException;
 import com.starrocks.sql.ast.AstVisitor;
 import com.starrocks.sql.parser.NodePosition;
 
@@ -34,11 +33,8 @@ public abstract class HintNode implements Comparable<HintNode>, ParseNode {
     public Scope getScope() {
         return Scope.QUERY;
     }
-    public abstract Map<String, String> getValue();
 
-    @Override
-    public void analyze(Analyzer analyzer) throws UserException {
-    }
+    public abstract Map<String, String> getValue();
 
     @Override
     public String toSql() {
@@ -59,11 +55,12 @@ public abstract class HintNode implements Comparable<HintNode>, ParseNode {
     public int compareTo(HintNode o) {
         return hintStr.compareTo(o.hintStr);
     }
+
     public enum Scope {
         // the entire query
         QUERY,
         // part of a query. Like hint in select * from (select hint from tbl),
-        // we may want the hint only takes effect in the subquery in the futuer.
+        // we may want the hint only takes effect in the subquery in the future.
         CLAUSE
     }
 }
